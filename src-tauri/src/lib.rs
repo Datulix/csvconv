@@ -38,9 +38,12 @@ pub fn run() {
             commands::cache_purge_run,
             commands::cache_purge_all,
             commands::cache_save_row,
+            commands::cache_save_rows,
             commands::cache_load_rows,
             commands::cache_upsert_run,
             commands::cache_list_runs,
+            commands::cache_save_trace,
+            commands::cache_load_all_traces,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

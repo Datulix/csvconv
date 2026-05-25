@@ -36,6 +36,7 @@ import type { ExtractedBatch } from "../pipelines/extractors/types";
 import { runPipeline, type PipelineProgress, type PipelineResult } from "../pipelines/runPipeline";
 import type { SplitFailure } from "../pipelines/autoSplit";
 import { FailedPageModal } from "./FailedPageModal";
+import { startTrace, beginPhase, completePhase } from "../lib/pipelineTrace";
 
 interface LogEntry {
   ts: number;
@@ -275,11 +276,23 @@ export function NewConversion({ onOpenInReview }: NewConversionInjectedProps) {
       }
 
       setPhase({ kind: "detecting", message: `Asking ${effectiveDetectorModel} to classify…` });
+      startTrace({
+        runId,
+        pdfPath,
+        pdfName: pdfPath.replace(/\\/g, "/").split("/").pop() ?? pdfPath,
+        mode,
+        format: null,
+        contentType: selectedSchema.content.content_type,
+        schemaName: selectedSchema.content.name,
+        startedAt: Date.now(),
+      });
+      beginPhase("detect", "Format Detection", "ai", { samples });
       const result = await runDetector({
         apiKey,
         modelId: effectiveDetectorModel,
         samples,
       });
+      completePhase("detect", result);
 
       setPhase({ kind: "detected", result, samples });
     } catch (err) {

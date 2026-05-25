@@ -33,17 +33,21 @@ fn staging_dir_for(app: &AppHandle, run_id: &str) -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-pub fn triage_pdf(
+pub async fn triage_pdf(
     path: String,
     _run_id: String,
     password: Option<String>,
 ) -> Result<TriageResult, String> {
-    let pdfium = make_pdfium()?;
-    triage::triage(&pdfium, &path, password.as_deref()).map_err(|e| format!("{e:#}"))
+    tauri::async_runtime::spawn_blocking(move || {
+        let pdfium = make_pdfium()?;
+        triage::triage(&pdfium, &path, password.as_deref()).map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| format!("thread error: {e}"))?
 }
 
 #[tauri::command]
-pub fn rasterize_pdf(
+pub async fn rasterize_pdf(
     app: AppHandle,
     path: String,
     dpi: u32,
@@ -55,19 +59,23 @@ pub fn rasterize_pdf(
     only_pages: Option<Vec<u32>>,
 ) -> Result<RasterizeResult, String> {
     let staging = staging_dir_for(&app, &run_id)?;
-    let pdfium = make_pdfium()?;
-    pdf::rasterize(
-        &pdfium,
-        &path,
-        dpi,
-        &staging,
-        password.as_deref(),
-        &deskew_pages.unwrap_or_default(),
-        &skew_angles.unwrap_or_default(),
-        &skip_pages.unwrap_or_default(),
-        only_pages.as_deref(),
-    )
-    .map_err(|e| format!("{e:#}"))
+    tauri::async_runtime::spawn_blocking(move || {
+        let pdfium = make_pdfium()?;
+        pdf::rasterize(
+            &pdfium,
+            &path,
+            dpi,
+            &staging,
+            password.as_deref(),
+            &deskew_pages.unwrap_or_default(),
+            &skew_angles.unwrap_or_default(),
+            &skip_pages.unwrap_or_default(),
+            only_pages.as_deref(),
+        )
+        .map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| format!("thread error: {e}"))?
 }
 
 #[tauri::command]
@@ -294,6 +302,15 @@ pub fn cache_save_row(
 }
 
 #[tauri::command]
+pub fn cache_save_rows(
+    app: AppHandle,
+    state: State<'_, CacheState>,
+    rows: Vec<RowRecord>,
+) -> Result<(), String> {
+    with_cache(&app, &state, |c| c.save_rows(&rows).map_err(|e| format!("{e:#}")))
+}
+
+#[tauri::command]
 pub fn cache_load_rows(
     app: AppHandle,
     state: State<'_, CacheState>,
@@ -321,4 +338,24 @@ pub fn cache_list_runs(
     state: State<'_, CacheState>,
 ) -> Result<Vec<RunRecord>, String> {
     with_cache(&app, &state, |c| c.list_runs().map_err(|e| format!("{e:#}")))
+}
+
+#[tauri::command]
+pub fn cache_save_trace(
+    app: AppHandle,
+    state: State<'_, CacheState>,
+    run_id: String,
+    trace_json: String,
+) -> Result<(), String> {
+    with_cache(&app, &state, |c| {
+        c.save_trace(&run_id, &trace_json).map_err(|e| format!("{e:#}"))
+    })
+}
+
+#[tauri::command]
+pub fn cache_load_all_traces(
+    app: AppHandle,
+    state: State<'_, CacheState>,
+) -> Result<Vec<String>, String> {
+    with_cache(&app, &state, |c| c.load_all_traces().map_err(|e| format!("{e:#}")))
 }

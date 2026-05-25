@@ -10,7 +10,7 @@ import type { RunMode } from "../schema/contentTypes";
 import type { Schema } from "../schema/types";
 import { schemaHash } from "../schema/hash";
 import {
-  saveRow,
+  saveRows,
   upsertRun,
   SqliteCacheBackend,
   type SqliteRowRecord,
@@ -571,7 +571,6 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
 
     // 11. Persist all rows to cache for the Review UI
     reportProgress(onProgress, { stage: "persist", message: "Saving rows to cache…" });
-    beginPhase("persist", "Persist", "system", { cacheKey });
     let totalRows = 0;
     const finalPages = merged.pages.map((page, _pi) => {
       const enrichedRows = page.rows.map((row) => {
@@ -585,6 +584,9 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
       return { ...page, rows: enrichedRows };
     });
 
+    beginPhase("persist", "Persist", "system", { cacheKey, pages: finalPages });
+
+    const records: SqliteRowRecord[] = [];
     for (const page of finalPages) {
       for (let rIdx = 0; rIdx < page.rows.length; rIdx++) {
         const row = page.rows[rIdx];
@@ -594,7 +596,7 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
           typeof (row as ComparedRow).ai_confidence === "number" &&
           (row as ComparedRow).ai_confidence! < VALIDATOR_CONFIDENCE_THRESHOLD &&
           (mode === "review" || mode === "answer");
-        const record: SqliteRowRecord = {
+        records.push({
           cache_key: cacheKey,
           page_number: page.page_number,
           row_index_within_page: rIdx,
@@ -604,14 +606,14 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
           user_edited: false,
           merged_from_pages: (row as unknown as { merged_from_pages?: number[] }).merged_from_pages ?? null,
           awaiting_answer_key: false,
-        };
-        await saveRow(record);
+        });
         totalRows += 1;
       }
     }
+    await saveRows(records);
 
     const allRowsOut: ExtractedRow[] = finalPages.flatMap((p) => p.rows);
-    completePhase("persist", { totalRows, cacheKey });
+    completePhase("persist", { totalRows, cacheKey, rows: allRowsOut });
 
     await upsertRun({
       cache_key: cacheKey,

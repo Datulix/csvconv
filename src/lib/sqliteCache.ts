@@ -107,6 +107,10 @@ export async function saveRow(record: SqliteRowRecord): Promise<void> {
   await invoke("cache_save_row", { row: record });
 }
 
+export async function saveRows(records: SqliteRowRecord[]): Promise<void> {
+  await invoke("cache_save_rows", { rows: records });
+}
+
 export async function loadRows(cacheKey: string): Promise<SqliteRowRecord[]> {
   return invoke<SqliteRowRecord[]>("cache_load_rows", { cacheKey });
 }
@@ -117,4 +121,12 @@ export async function upsertRun(record: SqliteRunRecord): Promise<void> {
 
 export async function listRuns(): Promise<SqliteRunRecord[]> {
   return invoke<SqliteRunRecord[]>("cache_list_runs");
+}
+
+export async function saveTrace(runId: string, traceJson: string): Promise<void> {
+  await invoke("cache_save_trace", { runId, traceJson });
+}
+
+export async function loadAllTraces(): Promise<string[]> {
+  return invoke<string[]>("cache_load_all_traces");
 }

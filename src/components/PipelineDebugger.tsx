@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { getTraceHistory, getTraceByRunId, type PhaseEntry, type PipelineTrace } from "../lib/pipelineTrace";
+import { getTraceHistory, getTraceByRunId, loadAllTracesFromDb, type PhaseEntry, type PipelineTrace, type AiCallEntry } from "../lib/pipelineTrace";
 import { listRuns, type SqliteRunRecord } from "../lib/sqliteCache";
 
 // ── Helpers ─────────────────────────────────────────────────────
@@ -582,14 +582,108 @@ function renderAnswerKeyOutput(output: unknown) {
 }
 
 function renderPersistOutput(output: unknown) {
-  const o = output as { totalRows: number; cacheKey: string };
+  const o = output as { totalRows: number; cacheKey: string; rows?: unknown[] };
   return (
     <Section label="Persisted">
       <KVPairs pairs={[
         ["Rows saved", String(o.totalRows)],
         ["Cache key", o.cacheKey],
       ]} />
+      {o.rows && o.rows.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div className="dbg-section-label">Persisted Rows Details</div>
+          <table className="dbg-table">
+            <thead>
+              <tr><th>Q#</th><th>Answer</th><th>Confidence</th></tr>
+            </thead>
+            <tbody>
+              {o.rows.map((row: any, i: number) => {
+                const conf = typeof row.confidence === "number" ? row.confidence : null;
+                return (
+                  <tr key={i}>
+                    <td>{String(row.question_number ?? "?")}</td>
+                    <td>{String(row.correct_answer ?? "—")}</td>
+                    <td>{conf !== null ? <ConfBar value={conf} /> : "—"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </Section>
+  );
+}
+
+function renderAiPrompts(aiCalls: AiCallEntry[]) {
+  return (
+    <div className="dbg-ai-calls-list">
+      {aiCalls.map((call, idx) => (
+        <div key={idx} className="dbg-ai-call-box">
+          <div className="dbg-ai-call-header">
+            <span className="dbg-ai-call-title">Call #{idx + 1} ({call.modelId})</span>
+            <span className="dbg-ai-call-time">{fmtDuration(call.durationMs)}</span>
+          </div>
+          {call.systemInstruction && (
+            <div className="dbg-ai-call-section">
+              <div className="dbg-ai-call-label">System Instruction</div>
+              <pre className="dbg-ai-code">{call.systemInstruction}</pre>
+            </div>
+          )}
+          <div className="dbg-ai-call-section">
+            <div className="dbg-ai-call-label">User Prompt / Parts</div>
+            <div className="dbg-ai-parts">
+              {call.parts.map((p, pIdx) => {
+                if (p.kind === "image") {
+                  return (
+                    <div key={pIdx} className="dbg-ai-part-image">
+                      <span className="dbg-ai-part-icon">🖼️</span>
+                      <span className="dbg-ai-part-meta">{p.mimeType} — {p.base64}</span>
+                    </div>
+                  );
+                }
+                return (
+                  <pre key={pIdx} className="dbg-ai-code text-part">{p.text}</pre>
+                );
+              })}
+            </div>
+          </div>
+          {!!call.responseSchema && (
+            <details className="dbg-ai-call-section">
+              <summary className="dbg-ai-call-label clickable" style={{ cursor: "pointer", userSelect: "none" }}>
+                Response Schema (click to expand)
+              </summary>
+              <pre className="dbg-json" style={{ marginTop: 6 }}>{JSON.stringify(call.responseSchema, null, 2)}</pre>
+            </details>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function renderAiResponses(aiCalls: AiCallEntry[]) {
+  return (
+    <div className="dbg-ai-calls-list">
+      {aiCalls.map((call, idx) => (
+        <div key={idx} className="dbg-ai-call-box">
+          <div className="dbg-ai-call-header">
+            <span className="dbg-ai-call-title">Call #{idx + 1} ({call.modelId})</span>
+            <span className="dbg-ai-call-time">{fmtDuration(call.durationMs)}</span>
+          </div>
+          <div className="dbg-ai-call-section">
+            <div className="dbg-ai-call-label">Raw Text Response</div>
+            <pre className="dbg-ai-code response-text">{call.rawResponse}</pre>
+          </div>
+          {call.parsedResponse !== undefined && (
+            <div className="dbg-ai-call-section">
+              <div className="dbg-ai-call-label">Parsed JSON Output</div>
+              <pre className="dbg-json">{JSON.stringify(call.parsedResponse, null, 2)}</pre>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -751,6 +845,13 @@ export function PipelineDebugger() {
   const [sqliteRuns, setSqliteRuns] = useState<SqliteRunRecord[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [activePhaseIdx, setActivePhaseIdx] = useState(0);
+  const [activeInputTab, setActiveInputTab] = useState<"visual" | "raw" | "ai">("visual");
+  const [activeOutputTab, setActiveOutputTab] = useState<"visual" | "raw" | "ai">("visual");
+
+  useEffect(() => {
+    setActiveInputTab("visual");
+    setActiveOutputTab("visual");
+  }, [selectedRunId, activePhaseIdx]);
 
   // Poll every 600ms so in-progress traces update live.
   useEffect(() => {
@@ -758,11 +859,18 @@ export function PipelineDebugger() {
     return () => clearInterval(id);
   }, []);
 
-  // Load SQLite runs on mount (and on manual refresh).
+  // Load SQLite runs and persisted traces on mount (and on manual refresh).
   function loadSqliteRuns() {
     listRuns().then(setSqliteRuns).catch(() => {});
   }
-  useEffect(() => { loadSqliteRuns(); }, []);
+  function loadPersistedTraces() {
+    loadAllTracesFromDb().then(() => setTick((t) => t + 1)).catch(() => {});
+  }
+  useEffect(() => {
+    loadSqliteRuns();
+    loadPersistedTraces();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Re-read trace history on every tick.
   const traceHistory = getTraceHistory(); // always fresh because tick changes
@@ -792,9 +900,9 @@ export function PipelineDebugger() {
       .map((r): RunEntry => ({
         runId: r.cache_key,
         label: r.cache_key.slice(0, 12),
-        sub: `${r.mode ?? "?"}${r.confirmed_format ? ` · ${r.confirmed_format}` : ""}`,
+        sub: `${r.mode ?? "?"}${r.confirmed_format ? ` · ${r.confirmed_format}` : ""} · no trace`,
         state: r.state ?? "?",
-        startedAt: r.started_at ? new Date(r.started_at).getTime() : 0,
+        startedAt: r.started_at ? Number(r.started_at) * 1000 || 0 : 0,
         hasTrace: false,
       })),
   ];
@@ -802,6 +910,7 @@ export function PipelineDebugger() {
   const selectedEntry = runs.find((r) => r.runId === selectedRunId) ?? null;
   const trace = selectedRunId ? getTraceByRunId(selectedRunId) : null;
   const phase = trace?.phases[activePhaseIdx] ?? null;
+  const hasAiCalls = !!(phase && phase.kind === "ai" && phase.aiCalls && phase.aiCalls.length > 0);
 
   function handleSelectRun(id: string) {
     setSelectedRunId(id);
@@ -811,6 +920,7 @@ export function PipelineDebugger() {
   function handleRefresh() {
     setTick((t) => t + 1);
     loadSqliteRuns();
+    loadPersistedTraces();
   }
 
   return (
@@ -849,8 +959,8 @@ export function PipelineDebugger() {
             <div className="dbg-empty">
               <div className="dbg-empty-title">No trace data</div>
               <div className="dbg-empty-sub">
-                This run was started in a previous session. Detailed phase trace data is only
-                available for runs started in the current session.
+                Phase trace data was not saved for this run. All future runs will have full
+                trace history available here.
               </div>
             </div>
           ) : !trace ? (
@@ -873,9 +983,9 @@ export function PipelineDebugger() {
                     <span className="dbg-step-num">{i + 1}</span>
                     <span className="dbg-step-name">{p.label}</span>
                     <span className="dbg-step-kind">{p.kind === "ai" ? "ai" : "sys"}</span>
-                    {p.durationMs !== undefined && p.status !== "skipped" && (
-                      <span className="dbg-step-dur">{fmtDuration(p.durationMs)}</span>
-                    )}
+                    <span className="dbg-step-dur">
+                      {p.durationMs !== undefined && p.status !== "skipped" ? fmtDuration(p.durationMs) : ""}
+                    </span>
                   </button>
                 ))}
                 {trace.phases.length === 0 && (
@@ -893,8 +1003,37 @@ export function PipelineDebugger() {
                       <span className={`dbg-kind-tag dbg-kind-${phase.kind}`}>
                         {phase.kind === "ai" ? "AI phase" : "System phase"}
                       </span>
+                      <div className="dbg-panel-tabs">
+                        <button
+                          type="button"
+                          className={`dbg-panel-tab-btn ${activeInputTab === "visual" ? "active" : ""}`}
+                          onClick={() => setActiveInputTab("visual")}
+                        >
+                          Visual
+                        </button>
+                        <button
+                          type="button"
+                          className={`dbg-panel-tab-btn ${activeInputTab === "raw" ? "active" : ""}`}
+                          onClick={() => setActiveInputTab("raw")}
+                        >
+                          Raw JSON
+                        </button>
+                        {hasAiCalls && (
+                          <button
+                            type="button"
+                            className={`dbg-panel-tab-btn ${activeInputTab === "ai" ? "active" : ""}`}
+                            onClick={() => setActiveInputTab("ai")}
+                          >
+                            AI Prompts
+                          </button>
+                        )}
+                      </div>
                     </div>
-                    <div className="dbg-panel-body">{renderInput(phase)}</div>
+                    <div className="dbg-panel-body">
+                      {activeInputTab === "visual" && renderInput(phase)}
+                      {activeInputTab === "raw" && <JsonBlock value={phase.input} />}
+                      {activeInputTab === "ai" && hasAiCalls && renderAiPrompts(phase.aiCalls || [])}
+                    </div>
                   </div>
                   <div className="dbg-panel">
                     <div className="dbg-panel-header">
@@ -903,8 +1042,37 @@ export function PipelineDebugger() {
                       {phase.durationMs !== undefined && phase.status === "completed" && (
                         <span className="dbg-dur-tag">{fmtDuration(phase.durationMs)}</span>
                       )}
+                      <div className="dbg-panel-tabs">
+                        <button
+                          type="button"
+                          className={`dbg-panel-tab-btn ${activeOutputTab === "visual" ? "active" : ""}`}
+                          onClick={() => setActiveOutputTab("visual")}
+                        >
+                          Visual
+                        </button>
+                        <button
+                          type="button"
+                          className={`dbg-panel-tab-btn ${activeOutputTab === "raw" ? "active" : ""}`}
+                          onClick={() => setActiveOutputTab("raw")}
+                        >
+                          Raw JSON
+                        </button>
+                        {hasAiCalls && (
+                          <button
+                            type="button"
+                            className={`dbg-panel-tab-btn ${activeOutputTab === "ai" ? "active" : ""}`}
+                            onClick={() => setActiveOutputTab("ai")}
+                          >
+                            AI Responses
+                          </button>
+                        )}
+                      </div>
                     </div>
-                    <div className="dbg-panel-body">{renderOutput(phase)}</div>
+                    <div className="dbg-panel-body">
+                      {activeOutputTab === "visual" && renderOutput(phase)}
+                      {activeOutputTab === "raw" && <JsonBlock value={phase.output} />}
+                      {activeOutputTab === "ai" && hasAiCalls && renderAiResponses(phase.aiCalls || [])}
+                    </div>
                   </div>
                 </div>
               ) : (

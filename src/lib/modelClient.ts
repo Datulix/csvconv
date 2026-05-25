@@ -1,6 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 import { z, ZodError } from "zod";
 import type { ModelId } from "./models";
+import { recordAiCallInCurrentPhase } from "./pipelineTrace";
 
 export type ContentPart =
   | { kind: "text"; text: string }
@@ -273,6 +274,7 @@ async function callOnce<T>(
         config.responseSchema = options.responseSchema;
       }
 
+      const startTime = Date.now();
       const response = await client.models.generateContent({
         model: options.modelId,
         contents: [{ role: "user", parts: toGenaiParts(options.parts) }],
@@ -353,6 +355,22 @@ async function callOnce<T>(
       }
 
       const usageMeta = response.usageMetadata;
+      const durationMs = Date.now() - startTime;
+      try {
+        recordAiCallInCurrentPhase({
+          modelId: options.modelId,
+          systemInstruction: options.systemInstruction,
+          parts: options.parts,
+          responseSchema: options.responseSchema,
+          rawResponse: text,
+          durationMs,
+          timestamp: Date.now(),
+          parsedResponse: validated,
+        });
+      } catch {
+        // ignore tracing error
+      }
+
       return {
         data: validated,
         usage: {

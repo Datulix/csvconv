@@ -12,6 +12,12 @@ CREATE TABLE IF NOT EXISTS pdfs (
   created_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS traces (
+  run_id TEXT PRIMARY KEY,
+  trace_json TEXT NOT NULL,
+  saved_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS runs (
   cache_key TEXT PRIMARY KEY,
   pdf_sha256 TEXT,
@@ -192,6 +198,20 @@ impl Cache {
 
     pub fn save_row(&self, row: &RowRecord) -> Result<()> {
         let conn = self.conn.lock().map_err(|_| anyhow::anyhow!("cache mutex poisoned"))?;
+        Self::insert_row(&conn, row)
+    }
+
+    pub fn save_rows(&self, rows: &[RowRecord]) -> Result<()> {
+        let conn = self.conn.lock().map_err(|_| anyhow::anyhow!("cache mutex poisoned"))?;
+        let tx = conn.unchecked_transaction()?;
+        for row in rows {
+            Self::insert_row(&tx, row)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn insert_row(conn: &Connection, row: &RowRecord) -> Result<()> {
         let canonical_str = serde_json::to_string(&row.canonical_json)?;
         let merged_str = row.merged_from_pages.as_ref().map(|v| {
             serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string())
@@ -287,6 +307,31 @@ impl Cache {
             ],
         )?;
         Ok(())
+    }
+
+    pub fn save_trace(&self, run_id: &str, trace_json: &str) -> Result<()> {
+        let conn = self.conn.lock().map_err(|_| anyhow::anyhow!("cache mutex poisoned"))?;
+        let now = chrono_now();
+        conn.execute(
+            "INSERT INTO traces (run_id, trace_json, saved_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(run_id) DO UPDATE SET trace_json=excluded.trace_json, saved_at=excluded.saved_at",
+            params![run_id, trace_json, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_all_traces(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().map_err(|_| anyhow::anyhow!("cache mutex poisoned"))?;
+        let mut stmt = conn.prepare(
+            "SELECT trace_json FROM traces ORDER BY saved_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut out: Vec<String> = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 
     pub fn list_runs(&self) -> Result<Vec<RunRecord>> {
