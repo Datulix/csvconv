@@ -101,7 +101,6 @@ export function Settings() {
         <h2>Google AI Studio API key</h2>
         {showPrivacyDetails ? (
           <div className="privacy-warning">
-            <div className="warning-icon">⚠️</div>
             <div className="warning-body">
               <h3>Privacy notice</h3>
               <p>

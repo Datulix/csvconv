@@ -86,19 +86,19 @@ export class RateLimitError extends Error {
 
 const DEFAULT_CONCURRENCY: Record<string, number> = {
   "gemini-3.1-flash-lite": 3,
-  "google/gemma-4-31B-it": 3,
+  "gemma-4-31B-it": 3,
 };
 
 const PER_MODEL_MAX_PAYLOAD_BYTES: Record<string, number> = {
   "gemini-3.1-flash-lite": 20 * 1024 * 1024,
-  "google/gemma-4-31B-it": 20 * 1024 * 1024,
+  "gemma-4-31B-it": 20 * 1024 * 1024,
 };
 
 class ConcurrencyLimiter {
   private active = 0;
   private waiting: Array<() => void> = [];
 
-  constructor(private max: number) {}
+  constructor(private max: number) { }
 
   setMax(max: number) {
     this.max = max;
@@ -258,7 +258,7 @@ async function callOnce<T>(
   validator: z.ZodType<T>,
 ): Promise<ModelCallResult<T>> {
   const client = getClient(options.apiKey);
-  const maxRetries = options.maxRetries ?? 3;
+  const maxRetries = options.maxRetries ?? 4;
   let lastError: unknown = null;
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {

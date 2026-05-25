@@ -37,6 +37,15 @@ import { runPipeline, type PipelineProgress, type PipelineResult } from "../pipe
 import type { SplitFailure } from "../pipelines/autoSplit";
 import { FailedPageModal } from "./FailedPageModal";
 
+interface LogEntry {
+  ts: number;
+  stage: string;
+  message: string;
+  done?: number;
+  total?: number;
+  level: "info" | "error";
+}
+
 type Phase =
   | { kind: "idle" }
   | { kind: "triaging"; message: string }
@@ -110,6 +119,8 @@ export function NewConversion({ onOpenInReview }: NewConversionInjectedProps) {
     error: string | null;
   }>({ running: false, progress: null, result: null, error: null });
   const [failedPageDetail, setFailedPageDetail] = useState<SplitFailure | null>(null);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [showLogs, setShowLogs] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -504,6 +515,7 @@ export function NewConversion({ onOpenInReview }: NewConversionInjectedProps) {
               fullRun={fullRun}
               onRunFullPipeline={async () => {
                 if (!pdfPath || !selectedSchema || !settings) return;
+                setLogs([]);
                 setFullRun({ running: true, progress: null, result: null, error: null });
                 try {
                   const apiKey = await getApiKey();
@@ -516,16 +528,24 @@ export function NewConversion({ onOpenInReview }: NewConversionInjectedProps) {
                     format: phase.kind === "ready_to_extract" ? phase.format : null,
                     settings,
                     runId,
-                    onProgress: (e) => setFullRun((s) => ({ ...s, progress: e })),
+                    onProgress: (e) => {
+                      setFullRun((s) => ({ ...s, progress: e }));
+                      setLogs((prev) => [...prev, { ts: Date.now(), stage: e.stage, message: e.message, done: e.done, total: e.total, level: "info" }]);
+                    },
                   });
+                  setLogs((prev) => [...prev, { ts: Date.now(), stage: "done", message: `Complete — ${result.summary.rowCount} rows, ${result.summary.pageCount} pages.`, level: "info" }]);
                   setFullRun({ running: false, progress: null, result, error: null });
                 } catch (err) {
                   const message = err instanceof Error ? err.message : String(err);
+                  setLogs((prev) => [...prev, { ts: Date.now(), stage: "error", message, level: "error" }]);
                   setFullRun({ running: false, progress: null, result: null, error: message });
                 }
               }}
               onOpenInReview={onOpenInReview}
               onOpenFailedPage={setFailedPageDetail}
+              logs={logs}
+              showLogs={showLogs}
+              onToggleLogs={() => setShowLogs((v) => !v)}
             />
           ) : null}
         </section>
@@ -713,6 +733,9 @@ interface ReadyToExtractReadoutProps {
   onRunFullPipeline: () => void;
   onOpenInReview: (cacheKey: string) => void;
   onOpenFailedPage: (failure: SplitFailure) => void;
+  logs: LogEntry[];
+  showLogs: boolean;
+  onToggleLogs: () => void;
 }
 
 function ReadyToExtractReadout({
@@ -727,6 +750,9 @@ function ReadyToExtractReadout({
   onRunFullPipeline,
   onOpenInReview,
   onOpenFailedPage,
+  logs,
+  showLogs,
+  onToggleLogs,
 }: ReadyToExtractReadoutProps) {
   return (
     <div className="ready-readout">
@@ -780,6 +806,41 @@ function ReadyToExtractReadout({
           {fullRun.running ? "Running pipeline…" : "Run full pipeline"}
         </button>
       </div>
+
+      {(logs.length > 0 || fullRun.running) && (
+        <div style={{ marginTop: 8 }}>
+          <button
+            type="button"
+            className="btn-secondary small"
+            onClick={onToggleLogs}
+          >
+            {showLogs ? "Hide logs" : `Show logs${logs.length > 0 ? ` (${logs.length})` : ""}`}
+          </button>
+        </div>
+      )}
+
+      {showLogs && (
+        <div className="log-panel">
+          <div className="log-panel-header">
+            <span className="log-panel-title">Pipeline log</span>
+            {fullRun.running && <div className="spinner" style={{ width: 10, height: 10, borderWidth: 1.5 }} />}
+          </div>
+          <div className="log-panel-body" ref={(el) => { if (el) el.scrollTop = el.scrollHeight; }}>
+            {logs.length === 0 ? (
+              <div className="log-entry"><span className="log-entry-msg" style={{ color: "var(--fg-faint)" }}>Waiting for pipeline to start…</span></div>
+            ) : logs.map((entry, i) => (
+              <div key={i} className={`log-entry level-${entry.level}`}>
+                <span className="log-entry-ts">{new Date(entry.ts).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>
+                <span className="log-entry-stage">{entry.stage}</span>
+                <span className="log-entry-msg">{entry.message}</span>
+                {entry.done != null && entry.total != null && (
+                  <span className="log-entry-progress">{entry.done}/{entry.total}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {fullRun.running && fullRun.progress ? (
         <div className="extract-pending">

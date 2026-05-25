@@ -733,7 +733,7 @@ Both available via Google AI Studio API and accessed through `@google/genai`. Us
 | Model ID                  | Vision | Use for                                  |
 | ------------------------- | ------ | ---------------------------------------- |
 | `gemini-3.1-flash-lite`   | yes    | Detector / Extractor / Solver / Validator |
-| `google/gemma-4-31B-it`   | yes    | Detector / Extractor / Solver / Validator |
+| `gemma-4-31B-it`   | yes    | Detector / Extractor / Solver / Validator |
 
 No default model — user must pick a primary per run. "Advanced" panel allows per-stage overrides. Cost preview updates live, broken down per stage. New models added by registering them in `lib/modelClient.ts` (one config object: id, label, vision-capable, RPM, max request size, pricing).
 
@@ -864,7 +864,7 @@ On reopen: hash the PDF, look up by `cache_key`, resume from last successful bat
 
 ## 14. Open items
 
-- Confirm latest published price tables and per-model request-size caps for `gemini-3.1-flash-lite` and `google/gemma-4-31B-it`.
+- Confirm latest published price tables and per-model request-size caps for `gemini-3.1-flash-lite` and `gemma-4-31B-it`.
 - Whether to allow per-field overrides of `confidence_threshold`.
 - Whether to expose "test on N pages" instead of just 1 page in the schema editor.
 - Streaming queue size tuning (default 50 may be too aggressive or too small in practice).

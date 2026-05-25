@@ -1,4 +1,4 @@
-export type ModelId = "gemini-3.1-flash-lite" | "google/gemma-4-31B-it";
+export type ModelId = "gemini-3.1-flash-lite" | "gemma-4-31B-it";
 
 export type PipelineStage = "detector" | "extractor" | "validator" | "solver";
 
@@ -21,7 +21,7 @@ export const SUPPORTED_MODELS: ModelInfo[] = [
     notes: "Purpose-built for structured extraction. Fastest and cheapest.",
   },
   {
-    id: "google/gemma-4-31B-it",
+    id: "gemma-4-31B-it",
     label: "Gemma 4 31B (instruction-tuned)",
     vision: true,
     inputPricePerMTok: 0.25,

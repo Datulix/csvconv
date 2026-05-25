@@ -5,9 +5,10 @@ import { SchemaEditor } from "./components/SchemaEditor";
 import { NewConversion } from "./components/NewConversion";
 import { ReviewTable } from "./components/ReviewTable";
 import { History } from "./components/History";
+import { PipelineDebugger } from "./components/PipelineDebugger";
 import "./App.css";
 
-type View = "convert" | "schemas" | "review" | "history" | "settings";
+type View = "convert" | "schemas" | "review" | "history" | "debug" | "settings";
 
 interface NavItem {
   id: View;
@@ -20,6 +21,7 @@ const NAV: NavItem[] = [
   { id: "schemas", label: "Schemas", icon: "≡" },
   { id: "review", label: "Review", icon: "◐" },
   { id: "history", label: "History", icon: "↶" },
+  { id: "debug", label: "Debug", icon: "" },
   { id: "settings", label: "Settings", icon: "⚙" },
 ];
 
@@ -77,6 +79,8 @@ function App() {
           <ReviewTable cacheKey={reviewCacheKey} />
         ) : view === "history" ? (
           <History onOpenRun={openInReview} />
+        ) : view === "debug" ? (
+          <PipelineDebugger />
         ) : (
           <Settings />
         )}

@@ -1,0 +1,1150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MCQ Pipeline Debugger</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #22263a;
+    --border: #2e3354;
+    --accent: #6366f1;
+    --accent-dim: #4f52cc;
+    --text: #e2e5f1;
+    --text-dim: #8b90b8;
+    --green: #22c55e;
+    --yellow: #eab308;
+    --red: #ef4444;
+    --blue: #3b82f6;
+    --orange: #f97316;
+    --radius: 8px;
+    --font-mono: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── Header ─────────────────────────────── */
+  .header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .header-icon { font-size: 22px; }
+  .header h1 { font-size: 17px; font-weight: 600; }
+  .header-sub { font-size: 12px; color: var(--text-dim); margin-top: 1px; }
+  .badge {
+    font-size: 11px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 7px;
+    color: var(--text-dim);
+    margin-left: auto;
+  }
+
+  /* ── Stepper ─────────────────────────────── */
+  .stepper-wrap {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 0 16px;
+    overflow-x: auto;
+    display: flex;
+    align-items: stretch;
+  }
+  .step {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    flex-shrink: 0;
+  }
+  .step-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 10px 14px;
+    cursor: pointer;
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 11px;
+    gap: 4px;
+    border-bottom: 2px solid transparent;
+    transition: all .15s;
+    position: relative;
+  }
+  .step-btn:hover { color: var(--text); background: var(--surface2); }
+  .step-btn.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+  .step-num {
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700;
+  }
+  .step-btn.active .step-num {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .step-label { white-space: nowrap; font-weight: 500; }
+  .step-kind { font-size: 9px; opacity: .7; }
+  .step-arrow { color: var(--border); font-size: 14px; padding: 0 2px; align-self: center; }
+
+  /* ── Main layout ─────────────────────────── */
+  .main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    overflow: hidden;
+    height: calc(100vh - 110px);
+  }
+  .panel {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-right: 1px solid var(--border);
+  }
+  .panel:last-child { border-right: none; }
+  .panel-header {
+    padding: 10px 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .panel-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--text-dim); }
+  .panel-tag {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid;
+  }
+  .tag-ai { background: #1e1b4b; border-color: var(--accent); color: var(--accent); }
+  .tag-sys { background: #1a2636; border-color: var(--blue); color: var(--blue); }
+  .tag-data { background: #1a2720; border-color: var(--green); color: var(--green); }
+  .panel-body { flex: 1; overflow-y: auto; padding: 16px; }
+
+  /* ── Content blocks ─────────────────────── */
+  .section { margin-bottom: 20px; }
+  .section-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    margin-bottom: 8px;
+  }
+  pre, code {
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+  .code-block {
+    background: #0a0c14;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px;
+    overflow-x: auto;
+    line-height: 1.6;
+    color: #a9b1d6;
+  }
+  .code-block .kw { color: #bb9af7; }
+  .code-block .str { color: #9ece6a; }
+  .code-block .num { color: #ff9e64; }
+  .code-block .key { color: #7dcfff; }
+  .code-block .cmt { color: #565f89; font-style: italic; }
+
+  /* ── Table ─────────────────────────────── */
+  .data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .data-table th {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    padding: 6px 10px;
+    text-align: left;
+    font-weight: 600;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .data-table td {
+    border: 1px solid var(--border);
+    padding: 6px 10px;
+    vertical-align: top;
+  }
+  .data-table tr:hover td { background: var(--surface2); }
+  .data-table tr.highlight td { background: #1e1b4b44; }
+  .data-table tr.merged td { background: #1a27204a; }
+
+  /* ── Confidence bar ────────────────────── */
+  .conf-wrap { display: flex; align-items: center; gap: 6px; min-width: 90px; }
+  .conf-bar-bg { flex: 1; height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
+  .conf-bar { height: 100%; border-radius: 3px; transition: width .3s; }
+  .conf-val { font-size: 11px; min-width: 30px; text-align: right; }
+  .conf-green .conf-bar { background: var(--green); }
+  .conf-green .conf-val { color: var(--green); }
+  .conf-yellow .conf-bar { background: var(--yellow); }
+  .conf-yellow .conf-val { color: var(--yellow); }
+  .conf-red .conf-bar { background: var(--red); }
+  .conf-red .conf-val { color: var(--red); }
+
+  /* ── Badges ─────────────────────────────── */
+  .pill {
+    display: inline-block;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-weight: 600;
+  }
+  .pill-green { background: #14532d44; color: var(--green); border: 1px solid #14532d; }
+  .pill-red { background: #7f1d1d44; color: var(--red); border: 1px solid #7f1d1d; }
+  .pill-yellow { background: #71350044; color: var(--yellow); border: 1px solid #713500; }
+  .pill-blue { background: #1e3a5f44; color: var(--blue); border: 1px solid #1e3a5f; }
+  .pill-purple { background: #1e1b4b44; color: var(--accent); border: 1px solid #1e1b4b; }
+
+  /* ── Image placeholder grid ─────────────── */
+  .page-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+  .page-thumb {
+    width: 90px; height: 120px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    color: var(--text-dim);
+    position: relative;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .page-thumb .pg-num {
+    font-size: 11px; font-weight: 700; color: var(--text);
+    position: absolute; top: 6px; left: 6px;
+    background: #0009; padding: 1px 5px; border-radius: 3px;
+  }
+  .page-thumb .pg-label {
+    position: absolute; bottom: 4px;
+    font-size: 9px; text-align: center; padding: 0 4px;
+  }
+  /* simulated page scan bg */
+  .page-thumb { background: repeating-linear-gradient(0deg, #1a1d2700 0px, #1a1d2700 18px, #22263a 18px, #22263a 19px); }
+  .page-thumb.pg-a { border-color: #3b82f6; box-shadow: 0 0 0 1px #3b82f688; }
+  .page-thumb.pg-b { border-color: #22c55e; box-shadow: 0 0 0 1px #22c55e44; }
+
+  /* ── Diff highlight ─────────────────────── */
+  .diff-add { background: #14532d33; color: var(--green); }
+  .diff-rem { background: #7f1d1d33; color: var(--red); text-decoration: line-through; }
+  .diff-neutral { color: var(--text-dim); }
+
+  /* ── Agreement indicator ────────────────── */
+  .agree { color: var(--green); font-size: 15px; }
+  .disagree { color: var(--red); font-size: 15px; }
+
+  /* ── Expand row ─────────────────────────── */
+  .expand-row td { background: #0a0c14 !important; padding: 10px 14px; font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); line-height: 1.6; }
+
+  /* ── Prompt box ─────────────────────────── */
+  .prompt-box {
+    background: #0a0c14;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius);
+    padding: 14px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    line-height: 1.65;
+    color: #c0c7ef;
+    white-space: pre-wrap;
+    overflow-x: auto;
+  }
+  .prompt-box .ph { color: #f97316; background: #f9731622; border-radius: 3px; padding: 0 2px; }
+
+  /* ── Info card ───────────────────────────── */
+  .info-card {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .info-row { display: flex; align-items: baseline; gap: 8px; font-size: 12px; }
+  .info-key { color: var(--text-dim); min-width: 140px; }
+  .info-val { color: var(--text); font-family: var(--font-mono); }
+
+  /* ── CSV preview ─────────────────────────── */
+  .csv-pre {
+    background: #0a0c14;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: #a9b1d6;
+    overflow-x: auto;
+    line-height: 1.5;
+  }
+  .csv-pre .csv-header { color: #7dcfff; font-weight: 700; }
+
+  /* ── Collapsible ─────────────────────────── */
+  details { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; margin-top: 12px; }
+  details summary {
+    cursor: pointer;
+    padding: 8px 12px;
+    background: var(--surface2);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-dim);
+    list-style: none;
+    user-select: none;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before { content: '▶ '; font-size: 9px; }
+  details[open] summary::before { content: '▼ '; }
+  details .details-body { padding: 12px; }
+
+  /* ── Scrollbar ──────────────────────────── */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-icon">🔬</div>
+  <div>
+    <h1>MCQ Pipeline Debugger</h1>
+    <div class="header-sub">Visualize each processing phase — input sent to model &amp; output received</div>
+  </div>
+  <div class="badge">Demo · Mock Data · sample_exam.pdf (10 questions)</div>
+</div>
+
+<!-- Stepper -->
+<div class="stepper-wrap" id="stepper"></div>
+
+<!-- Main panels -->
+<div class="main">
+  <div class="panel">
+    <div class="panel-header">
+      <span class="panel-title">⬆ Input</span>
+      <span id="input-tag" class="panel-tag"></span>
+      <span id="input-desc" style="font-size:11px;color:var(--text-dim);margin-left:auto;"></span>
+    </div>
+    <div class="panel-body" id="input-body"></div>
+  </div>
+  <div class="panel">
+    <div class="panel-header">
+      <span class="panel-title">⬇ Output</span>
+      <span id="output-tag" class="panel-tag"></span>
+      <span id="output-desc" style="font-size:11px;color:var(--text-dim);margin-left:auto;"></span>
+    </div>
+    <div class="panel-body" id="output-body"></div>
+  </div>
+</div>
+
+<script>
+// ─────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────
+function conf(value) {
+  const cls = value >= 0.75 ? 'conf-green' : value >= 0.5 ? 'conf-yellow' : 'conf-red';
+  return `<div class="conf-wrap ${cls}">
+    <div class="conf-bar-bg"><div class="conf-bar" style="width:${value*100}%"></div></div>
+    <div class="conf-val">${value.toFixed(2)}</div>
+  </div>`;
+}
+
+function pill(text, color) {
+  return `<span class="pill pill-${color}">${text}</span>`;
+}
+
+function thumb(n, label, cls='') {
+  return `<div class="page-thumb ${cls}">
+    <div class="pg-num">${n}</div>
+    <div style="font-size:24px;opacity:.15">📄</div>
+    <div class="pg-label">${label}</div>
+  </div>`;
+}
+
+function table(headers, rows, opts={}) {
+  const ths = headers.map(h=>`<th>${h}</th>`).join('');
+  const trs = rows.map(([cls,...cells])=>{
+    const tds = cells.map(c=>`<td>${c}</td>`).join('');
+    return `<tr class="${cls}">${tds}</tr>`;
+  }).join('');
+  return `<table class="data-table">${opts.caption?`<caption style="color:var(--text-dim);font-size:11px;text-align:left;padding-bottom:6px">${opts.caption}</caption>`:''}<thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+}
+
+function section(label, content) {
+  return `<div class="section"><div class="section-label">${label}</div>${content}</div>`;
+}
+
+function codeBlock(text) {
+  // Simple JSON highlighter
+  const escaped = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const highlighted = escaped
+    .replace(/"([^"]+)"(?=\s*:)/g, '<span class="key">"$1"</span>')
+    .replace(/:\s*"([^"]*)"/g, ': <span class="str">"$1"</span>')
+    .replace(/:\s*(\d+\.?\d*)/g, ': <span class="num">$1</span>')
+    .replace(/:\s*(true|false|null)/g, ': <span class="kw">$1</span>');
+  return `<div class="code-block"><pre>${highlighted}</pre></div>`;
+}
+
+function promptBox(text) {
+  return `<div class="prompt-box">${text}</div>`;
+}
+
+function infoCard(pairs) {
+  const rows = pairs.map(([k,v])=>`<div class="info-row"><div class="info-key">${k}</div><div class="info-val">${v}</div></div>`).join('');
+  return `<div class="info-card">${rows}</div>`;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Phase definitions
+// ─────────────────────────────────────────────────────────────────
+const PHASES = [
+  {
+    id: 1, name: 'Triage', kind: '⚙ System',
+    tagClass: 'tag-sys',
+    inputDesc: 'PDF file + run ID',
+    outputDesc: 'Per-page metadata',
+    input() {
+      return section('Rust command invoked', infoCard([
+        ['Command', 'triage_pdf'],
+        ['pdf_path', 'C:\\Users\\PC\\Documents\\sample_exam.pdf'],
+        ['run_id', 'run_20260525_143201'],
+        ['dpi_hint', '300'],
+      ])) +
+      section('What Triage checks per page', `<ul style="font-size:12px;color:var(--text-dim);padding-left:18px;line-height:2">
+        <li>Extracts text via pdfium → <strong>text_density</strong> (char count)</li>
+        <li>Renders to 72 DPI grayscale → pixel histogram → <strong>is_blank</strong></li>
+        <li>Classifies: digital (&gt;50 chars) / scanned (&lt;5 chars) / mixed</li>
+        <li>Runs Hough transform on scanned pages → <strong>skew_angle_deg</strong></li>
+      </ul>`);
+    },
+    output() {
+      return section('TriageResult', codeBlock(`{
+  "pdf_type": "mixed",
+  "page_count": 12,
+  "pages": [
+    { "page_number": 1,  "is_blank": false, "page_type": "digital", "text_density": 1240, "skew_angle_deg": 0.0  },
+    { "page_number": 2,  "is_blank": false, "page_type": "scanned", "text_density": 3,    "skew_angle_deg": -1.2 },
+    { "page_number": 3,  "is_blank": false, "page_type": "scanned", "text_density": 2,    "skew_angle_deg": -1.3 },
+    { "page_number": 4,  "is_blank": false, "page_type": "scanned", "text_density": 4,    "skew_angle_deg": -0.8 },
+    { "page_number": 5,  "is_blank": false, "page_type": "scanned", "text_density": 1,    "skew_angle_deg": -1.1 },
+    { "page_number": 6,  "is_blank": true,  "page_type": "scanned", "text_density": 0,    "skew_angle_deg": 0.0  },
+    { "page_number": 7,  "is_blank": false, "page_type": "scanned", "text_density": 5,    "skew_angle_deg": -0.9 },
+    { "page_number": 8,  "is_blank": false, "page_type": "scanned", "text_density": 3,    "skew_angle_deg": -1.4 },
+    { "page_number": 9,  "is_blank": false, "page_type": "scanned", "text_density": 2,    "skew_angle_deg": -0.7 },
+    { "page_number": 10, "is_blank": false, "page_type": "scanned", "text_density": 4,    "skew_angle_deg": -1.0 },
+    { "page_number": 11, "is_blank": false, "page_type": "scanned", "text_density": 6,    "skew_angle_deg": -0.5 },
+    { "page_number": 12, "is_blank": true,  "page_type": "scanned", "text_density": 0,    "skew_angle_deg": 0.0  }
+  ]
+}`)) +
+      section('Summary', table(
+        ['Page','Type','Blank','Text density','Skew angle'],
+        [
+          ['','1','digital','—','1240 chars','0.0°'],
+          ['','2','scanned','—','3 chars','-1.2°'],
+          ['','3','scanned','—','2 chars','-1.3°'],
+          ['','4','scanned','—','4 chars','-0.8°'],
+          ['','5','scanned','—','1 char','-1.1°'],
+          ['highlight','6','scanned',pill('BLANK','red'),'0','0.0°'],
+          ['','7','scanned','—','5 chars','-0.9°'],
+          ['','8','scanned','—','3 chars','-1.4°'],
+          ['','9','scanned','—','2 chars','-0.7°'],
+          ['','10','scanned','—','4 chars','-1.0°'],
+          ['','11','scanned','—','6 chars','-0.5°'],
+          ['highlight','12','scanned',pill('BLANK','red'),'0','0.0°'],
+        ]
+      ));
+    }
+  },
+
+  {
+    id: 2, name: 'Rasterize', kind: '⚙ System',
+    tagClass: 'tag-sys',
+    inputDesc: 'TriageResult + deskew hints',
+    outputDesc: 'Page JPEG files',
+    input() {
+      return section('Rust command invoked', infoCard([
+        ['Command', 'rasterize_pdf'],
+        ['pdf_path', 'C:\\Users\\PC\\Documents\\sample_exam.pdf'],
+        ['dpi', '300'],
+        ['quality', '82'],
+        ['max_long_edge_px', '2048'],
+        ['skip_pages', '[6, 12]  ← blank from triage'],
+        ['deskew_pages', '[2,3,4,5,7,8,9,10,11]'],
+        ['skew_angles', '[-1.2, -1.3, -0.8, -1.1, -0.9, -1.4, -0.7, -1.0, -0.5]'],
+      ])) +
+      section('Processing applied per page', `<ul style="font-size:12px;color:var(--text-dim);padding-left:18px;line-height:2">
+        <li>Render PDF page at 300 DPI → RGBA bitmap</li>
+        <li>Re-encode as JPEG quality=82, cap 2048px</li>
+        <li>Scanned pages: rotate by −skew_angle, auto-contrast</li>
+        <li>Blank pages: <em>skipped entirely</em></li>
+        <li>Output written to <code>%APPDATA%/csvconv/staging/run_20260525_143201/</code></li>
+      </ul>`);
+    },
+    output() {
+      return section('RasterizeResult', codeBlock(`{
+  "staging_dir": "C:\\\\AppData\\\\Roaming\\\\csvconv\\\\staging\\\\run_20260525_143201",
+  "pages": [
+    { "page_number": 1,  "path": "page-001.jpg", "width": 1654, "height": 2339, "deskewed": false, "skipped": false },
+    { "page_number": 2,  "path": "page-002.jpg", "width": 1654, "height": 2339, "deskewed": true,  "skipped": false },
+    { "page_number": 6,  "path": null,            "width": 0,    "height": 0,    "deskewed": false, "skipped": true  },
+    { "page_number": 12, "path": null,            "width": 0,    "height": 0,    "deskewed": false, "skipped": true  }
+  ]
+}`)) +
+      section('Output page thumbnails (simulated)', `<div class="page-grid">
+        ${thumb(1,'digital<br>no deskew','pg-b')}
+        ${thumb(2,'scanned<br>deskewed','pg-b')}
+        ${thumb(3,'scanned<br>deskewed','pg-b')}
+        ${thumb(4,'scanned<br>deskewed','pg-b')}
+        ${thumb(5,'scanned<br>deskewed','pg-b')}
+        <div class="page-thumb" style="opacity:.3;border-style:dashed">${'<div class="pg-num">6</div><div style="font-size:20px">🚫</div><div class="pg-label">SKIPPED</div>'}</div>
+        ${thumb(7,'scanned<br>deskewed','pg-b')}
+        ${thumb(8,'scanned<br>deskewed','pg-b')}
+        ${thumb(9,'scanned<br>deskewed','pg-b')}
+        ${thumb(10,'scanned<br>deskewed','pg-b')}
+        ${thumb(11,'scanned<br>deskewed','pg-b')}
+        <div class="page-thumb" style="opacity:.3;border-style:dashed">${'<div class="pg-num">12</div><div style="font-size:20px">🚫</div><div class="pg-label">SKIPPED</div>'}</div>
+      </div>`);
+    }
+  },
+
+  {
+    id: 3, name: 'Detect Format', kind: '🤖 AI',
+    tagClass: 'tag-ai',
+    inputDesc: 'Sample pages + prompt → model',
+    outputDesc: 'DetectorResult',
+    input() {
+      return section('Sample pages sent to model (3 pages)', `<div class="page-grid">
+        ${thumb(1,'Page 1<br>first page','pg-a')}
+        ${thumb(6,'Page 6<br>middle','pg-a')}
+        ${thumb(11,'Page 11<br>last','pg-a')}
+      </div>`) +
+      section('Prompt sent to model', promptBox(
+`You are analyzing a multiple-choice exam. The images show sample pages from the PDF.
+
+Your task: identify the answer-marking FORMAT used in this document.
+
+Choose ONE of these formats:
+  • inline_marked   — options on same page, one option is circled/ticked/underlined/highlighted
+  • written_answer  — a letter is written or printed next to each question number
+  • answer_key_at_end — questions have no marks; answers appear on a separate key page
+  • bubble_sheet    — OMR-style bubbles (separate sheet)
+  • no_answers      — no answers visible
+  • mixed_or_unclear — more than one format, or ambiguous
+
+Also analyze the layout:
+  • columns: number of columns per page (1 or 2)
+  • has_math: true if equations/formulas are present
+  • primary_language: ISO 639-1 code
+  • questions_per_page_estimate: rough count per page
+
+Return JSON only, no prose:
+{
+  "format": "...",
+  "confidence": <0.0–1.0>,
+  "layout": {
+    "columns": <int>,
+    "has_math": <bool>,
+    "primary_language": "<lang>",
+    "questions_per_page_estimate": <int>
+  },
+  "notes": "<brief explanation>"
+}`));
+    },
+    output() {
+      return section('Raw model response', codeBlock(`{
+  "format": "inline_marked",
+  "confidence": 0.92,
+  "layout": {
+    "columns": 1,
+    "has_math": false,
+    "primary_language": "en",
+    "questions_per_page_estimate": 2
+  },
+  "notes": "Options A-D visible on each page; one option per question has a clear circle mark drawn around it. Consistent across all three sample pages."
+}`)) +
+      section('Parsed DetectorResult', `
+        <div class="info-card" style="gap:12px">
+          <div class="info-row">
+            <div class="info-key">Format detected</div>
+            <div class="info-val">${pill('inline_marked','purple')}</div>
+          </div>
+          <div class="info-row">
+            <div class="info-key">Confidence</div>
+            <div>${conf(0.92)}</div>
+          </div>
+          <div class="info-row">
+            <div class="info-key">Columns</div>
+            <div class="info-val">1</div>
+          </div>
+          <div class="info-row">
+            <div class="info-key">Has math</div>
+            <div class="info-val">${pill('false','blue')}</div>
+          </div>
+          <div class="info-row">
+            <div class="info-key">Language</div>
+            <div class="info-val">en</div>
+          </div>
+          <div class="info-row">
+            <div class="info-key">Questions/page estimate</div>
+            <div class="info-val">~2</div>
+          </div>
+          <div class="info-row">
+            <div class="info-key">Decision</div>
+            <div class="info-val">${pill('AUTO-PROCEED (conf ≥ 0.6)','green')}</div>
+          </div>
+          <div class="info-row" style="align-items:flex-start">
+            <div class="info-key">Notes</div>
+            <div class="info-val" style="color:var(--text-dim);font-family:sans-serif;font-size:11.5px;line-height:1.5">Options A-D visible on each page; one option per question has a clear circle mark drawn around it. Consistent across all three sample pages.</div>
+          </div>
+        </div>
+      `);
+    }
+  },
+
+  {
+    id: 4, name: 'Extract', kind: '🤖 AI',
+    tagClass: 'tag-ai',
+    inputDesc: 'Batch of pages + prompt → model',
+    outputDesc: 'ExtractedBatch (rows per page)',
+    input() {
+      return section('Pages in this batch (batch 1 of 5)', `<div class="page-grid">
+        ${thumb(2,'Page 2','pg-a')}
+        ${thumb(3,'Page 3','pg-a')}
+      </div>`) +
+      section('Extractor: mcq_inlineMarked — prompt sent to model', promptBox(
+`You are extracting MCQ answers from a scanned exam page (format: inline_marked).
+
+Rules:
+  1. Extract ONLY the visually marked answer — do not guess or infer
+  2. If a mark is ambiguous or multiple options are marked, set multiple_marks_detected=true and lower confidence
+  3. For each question record: question_number, question_text, all options (A–D/E), correct_answer (the marked letter), marking_style
+  4. Set is_partial=true if the question continues onto the next page
+  5. Confidence: 1.0 = clearly marked, 0.75 = somewhat clear, 0.5 = ambiguous, <0.5 = very uncertain
+  6. mcq_type: "best_answer" | "except_negative" | "all_of_above" | "matching" | "standard"
+
+<span class="ph">{{user_schema_fields}}</span>: [question_number, question_text, options, correct_answer, confidence]
+
+Return JSON:
+{
+  "pages": [{
+    "page_number": <int>,
+    "layout_notes": "<string>",
+    "rows": [{ ... }]
+  }]
+}`));
+    },
+    output() {
+      return section('Raw model response (batch 1)', codeBlock(`{
+  "pages": [
+    {
+      "page_number": 2,
+      "layout_notes": "Single column, 2 questions. Q1 clearly circled on option B. Q2 has a tick mark on option A.",
+      "rows": [
+        {
+          "question_number": "1",
+          "question_text": "Which of the following is the primary function of the mitochondria?",
+          "options": { "A": "Protein synthesis", "B": "ATP production", "C": "DNA replication", "D": "Cell division" },
+          "correct_answer": "B",
+          "marking_style": "circled",
+          "mcq_type": "standard",
+          "multiple_marks_detected": false,
+          "is_partial": false,
+          "confidence": 0.95,
+          "notes": "Clear circle around option B"
+        },
+        {
+          "question_number": "2",
+          "question_text": "Which of the following is NOT a function of the liver?",
+          "options": { "A": "Detoxification", "B": "Hormone production", "C": "Bile secretion", "D": "Insulin production" },
+          "correct_answer": "D",
+          "marking_style": "ticked",
+          "mcq_type": "except_negative",
+          "multiple_marks_detected": false,
+          "is_partial": false,
+          "confidence": 0.88,
+          "notes": "Tick visible next to option D"
+        }
+      ]
+    },
+    {
+      "page_number": 3,
+      "layout_notes": "Q3 has ambiguous mark — appears to be between B and C. Q4 starts here but text continues on next page.",
+      "rows": [
+        {
+          "question_number": "3",
+          "question_text": "The Krebs cycle occurs in the:",
+          "options": { "A": "Cytoplasm", "B": "Mitochondrial matrix", "C": "Inner mitochondrial membrane", "D": "Nucleus" },
+          "correct_answer": "B",
+          "marking_style": "circled",
+          "mcq_type": "standard",
+          "multiple_marks_detected": true,
+          "is_partial": false,
+          "confidence": 0.42,
+          "notes": "Mark is smudged and could be B or C — multiple_marks_detected set"
+        },
+        {
+          "question_number": "4",
+          "question_text": "The process by which glucose is converted to pyruvate is called:",
+          "options": { "A": "Glycolysis", "B": null, "C": null, "D": null },
+          "correct_answer": null,
+          "marking_style": "none",
+          "mcq_type": "standard",
+          "multiple_marks_detected": false,
+          "is_partial": true,
+          "confidence": 0.0,
+          "notes": "Question continues onto next page — options B/C/D and mark not yet visible"
+        }
+      ]
+    }
+  ]
+}`)) +
+      section('Parsed rows', table(
+        ['Q#','Question (truncated)','Answer','Marking','Confidence','Flags'],
+        [
+          ['','1','Which is the primary function of mitochondria?','<strong>B</strong>','circled',conf(0.95),''],
+          ['','2','Which is NOT a function of the liver?','<strong>D</strong>','ticked',conf(0.88),''],
+          ['highlight','3','The Krebs cycle occurs in the:','<strong>B</strong>','circled',conf(0.42),pill('ambiguous','yellow')+' '+pill('needs validation','red')],
+          ['highlight','4','Glucose → pyruvate process is called:','<em>null</em>','—',conf(0.0),pill('is_partial','blue')],
+        ]
+      ));
+    }
+  },
+
+  {
+    id: 5, name: 'Merge', kind: '⚙ System',
+    tagClass: 'tag-sys',
+    inputDesc: 'All extracted batches (with partial rows)',
+    outputDesc: 'Merged rows (cross-page questions joined)',
+    input() {
+      return section('Trigger condition', `<div style="font-size:12px;color:var(--text-dim);line-height:1.8">
+        Merge runs after all extraction batches complete.<br>
+        It scans for adjacent pages where <code>page[N].last_row.is_partial = true</code>.<br>
+        If <code>page[N+1].first_row.question_number</code> matches → merge the two rows.
+      </div>`) +
+      section('Partial row (page 3, last row)', table(
+        ['Field','Value'],
+        [
+          ['','question_number','<strong>4</strong>'],
+          ['','question_text','"The process by which glucose is converted to pyruvate is called:"'],
+          ['','options.A','"Glycolysis"'],
+          ['highlight','options.B','<em>null</em> ← missing'],
+          ['highlight','options.C','<em>null</em> ← missing'],
+          ['highlight','options.D','<em>null</em> ← missing'],
+          ['highlight','correct_answer','<em>null</em> ← not yet visible'],
+          ['highlight','is_partial','<strong>true</strong>'],
+        ]
+      )) +
+      section('Continuation row (page 4, first row)', table(
+        ['Field','Value'],
+        [
+          ['','question_number','<strong>4</strong>  ← matches!'],
+          ['','question_text','"(continued) Glycolysis, Oxidation, Fermentation, or Beta-oxidation?"'],
+          ['','options.B','"Oxidation"'],
+          ['','options.C','"Fermentation"'],
+          ['','options.D','"Beta-oxidation"'],
+          ['','correct_answer','<strong>A</strong>  ← circled on this page'],
+          ['','is_partial','false'],
+        ]
+      ));
+    },
+    output() {
+      return section('Merged row (Q4)', table(
+        ['Field','Before merge','After merge'],
+        [
+          ['merged','question_text',
+            '"The process by which glucose is converted to pyruvate is called:"',
+            '<span class="diff-add">"The process by which glucose is converted to pyruvate is called: Glycolysis, Oxidation, Fermentation, or Beta-oxidation?"</span>'
+          ],
+          ['merged','options.B','<span class="diff-rem">null</span>','<span class="diff-add">"Oxidation"</span>'],
+          ['merged','options.C','<span class="diff-rem">null</span>','<span class="diff-add">"Fermentation"</span>'],
+          ['merged','options.D','<span class="diff-rem">null</span>','<span class="diff-add">"Beta-oxidation"</span>'],
+          ['merged','correct_answer','<span class="diff-rem">null</span>','<span class="diff-add"><strong>A</strong></span>'],
+          ['merged','is_partial','<span class="diff-rem">true</span>','<span class="diff-add">false</span>'],
+          ['merged','merged_from_pages','<span class="diff-rem">—</span>','<span class="diff-add">[3, 4]</span>'],
+          ['','confidence','—','0.91 (from page 4 continuation)'],
+        ]
+      )) +
+      section('All rows after merge', table(
+        ['Q#','Answer','is_partial','merged_from_pages','Confidence'],
+        [
+          ['','1','B','false','—',conf(0.95)],
+          ['','2','D','false','—',conf(0.88)],
+          ['','3','B','false','—',conf(0.42)],
+          ['merged','4','A',pill('false (merged)','green'),pill('[3, 4]','blue'),conf(0.91)],
+          ['','5','C','false','—',conf(0.87)],
+          ['','6','A','false','—',conf(0.93)],
+          ['','7','B','false','—',conf(0.89)],
+          ['','8','D','false','—',conf(0.82)],
+          ['','9','C','false','—',conf(0.76)],
+          ['','10','A','false','—',conf(0.84)],
+        ]
+      ));
+    }
+  },
+
+  {
+    id: 6, name: 'Validate', kind: '🤖 AI',
+    tagClass: 'tag-ai',
+    inputDesc: 'Low-confidence rows → re-extraction',
+    outputDesc: 'ValidatedBatch + needs_review flags',
+    input() {
+      return section('Trigger condition', `<div style="font-size:12px;color:var(--text-dim);line-height:1.8">
+        Validator runs on rows with <code>confidence &lt; 0.75</code>.<br>
+        <strong>Q3</strong> (conf = 0.42) is the only row below threshold.<br>
+        Mode: <em>cross-model</em> — primary model extracted, secondary model re-checks.
+      </div>`) +
+      section('Q3 page image sent (Page 3)', `<div class="page-grid">${thumb(3,'Page 3 — Q3','pg-a')}</div>`) +
+      section('Validation prompt (secondary model)', promptBox(
+`You are double-checking a single MCQ extraction where the primary model flagged uncertainty.
+
+Primary model extracted:
+  question_number: "3"
+  question_text:   "The Krebs cycle occurs in the:"
+  correct_answer:  "B"  (Mitochondrial matrix)
+  confidence:      0.42
+  notes:           "Mark is smudged and could be B or C — multiple_marks_detected set"
+
+Examine the image carefully. Which option letter has a mark on it?
+Report your answer and your confidence (0.0–1.0).
+
+Return JSON only:
+{
+  "correct_answer": "<letter>",
+  "confidence": <float>,
+  "notes": "<explanation>"
+}`));
+    },
+    output() {
+      return section('Secondary model response (Q3)', codeBlock(`{
+  "correct_answer": "C",
+  "confidence": 0.71,
+  "notes": "Upon closer inspection the circular mark is centered on option C (Inner mitochondrial membrane). Option B has a faint smudge that is likely incidental ink transfer, not an intentional mark."
+}`)) +
+      section('Disagreement detected', `<div class="info-card" style="border-color:var(--red)">
+        <div class="info-row"><div class="info-key">Primary answer</div><div class="info-val"><strong>B</strong> (conf 0.42)</div></div>
+        <div class="info-row"><div class="info-key">Secondary answer</div><div class="info-val"><strong>C</strong> (conf 0.71)</div></div>
+        <div class="info-row"><div class="info-key">Decision</div><div class="info-val">${pill('DISAGREEMENT → needs_review = true','red')}</div></div>
+        <div class="info-row"><div class="info-key">Canonical answer</div><div class="info-val">C (higher confidence wins)</div></div>
+      </div>`) +
+      section('ValidatedBatch output', table(
+        ['Q#','Answer','Confidence','needs_review','Candidates'],
+        [
+          ['','1','B',conf(0.95),'—','—'],
+          ['','2','D',conf(0.88),'—','—'],
+          ['highlight','3','C',conf(0.71),pill('⚠ REVIEW','red'),`${pill('primary: B (0.42)','yellow')} ${pill('secondary: C (0.71)','blue')}`],
+          ['','4','A',conf(0.91),'—','—'],
+          ['','5','C',conf(0.87),'—','—'],
+          ['','6','A',conf(0.93),'—','—'],
+          ['','7','B',conf(0.89),'—','—'],
+          ['','8','D',conf(0.82),'—','—'],
+          ['','9','C',conf(0.76),'—','—'],
+          ['','10','A',conf(0.84),'—','—'],
+        ]
+      ));
+    }
+  },
+
+  {
+    id: 7, name: 'Solve', kind: '🤖 AI',
+    tagClass: 'tag-ai',
+    inputDesc: 'Questions + images → AI answers independently',
+    outputDesc: 'SolverBatchResponse (ai_answer per Q)',
+    input() {
+      return section('Mode: Review', `<div style="font-size:12px;color:var(--text-dim);line-height:1.8">
+        Solver runs when <code>mode = "review"</code> or <code>"answer_from_scratch"</code>.<br>
+        The AI independently answers every question <em>without seeing the marked answers</em>.<br>
+        Questions grouped in batches of 5 by source page.
+      </div>`) +
+      section('Questions sent in batch 1 (Q1–Q5)', `<div style="font-size:12px;line-height:1.8;color:var(--text-dim)">
+        <strong>Q1:</strong> Which of the following is the primary function of the mitochondria?<br>
+        <em style="padding-left:16px">A) Protein synthesis &nbsp; B) ATP production &nbsp; C) DNA replication &nbsp; D) Cell division</em><br><br>
+        <strong>Q2:</strong> Which of the following is NOT a function of the liver?<br>
+        <em style="padding-left:16px">A) Detoxification &nbsp; B) Hormone production &nbsp; C) Bile secretion &nbsp; D) Insulin production</em><br><br>
+        <strong>Q3:</strong> The Krebs cycle occurs in the:<br>
+        <em style="padding-left:16px">A) Cytoplasm &nbsp; B) Mitochondrial matrix &nbsp; C) Inner mitochondrial membrane &nbsp; D) Nucleus</em><br><br>
+        <strong>Q4:</strong> Glucose → pyruvate process is called:<br>
+        <em style="padding-left:16px">A) Glycolysis &nbsp; B) Oxidation &nbsp; C) Fermentation &nbsp; D) Beta-oxidation</em><br><br>
+        <strong>Q5:</strong> Which molecule carries electrons in the electron transport chain?<br>
+        <em style="padding-left:16px">A) ATP &nbsp; B) ADP &nbsp; C) NADH &nbsp; D) FADH</em>
+      </div>`) +
+      section('Solver prompt', promptBox(
+`You are answering multiple-choice questions independently. Do NOT look at any marks — reason from knowledge only.
+
+For each question:
+  1. Think step-by-step
+  2. Identify the single best answer letter
+  3. Assign confidence (0.0–1.0)
+  4. Provide a short explanation
+
+Return JSON:
+{
+  "questions": [
+    {
+      "question_number": "<str>",
+      "ai_answer": "<A|B|C|D|E|null>",
+      "ai_explanation": "<string>",
+      "ai_confidence": <float>
+    }
+  ]
+}`));
+    },
+    output() {
+      return section('Raw model response (batch 1)', codeBlock(`{
+  "questions": [
+    { "question_number": "1", "ai_answer": "B", "ai_explanation": "Mitochondria are the powerhouse of the cell, producing ATP via oxidative phosphorylation.", "ai_confidence": 0.99 },
+    { "question_number": "2", "ai_answer": "D", "ai_explanation": "The liver does not produce insulin — that is the function of pancreatic beta cells. The liver detoxifies blood, produces bile, and has some endocrine activity.", "ai_confidence": 0.97 },
+    { "question_number": "3", "ai_answer": "B", "ai_explanation": "The Krebs (citric acid) cycle occurs in the mitochondrial matrix where acetyl-CoA is oxidized.", "ai_confidence": 0.98 },
+    { "question_number": "4", "ai_answer": "A", "ai_explanation": "Glycolysis is the metabolic pathway that converts glucose to pyruvate in the cytoplasm.", "ai_confidence": 0.99 },
+    { "question_number": "5", "ai_answer": "C", "ai_explanation": "NADH (nicotinamide adenine dinucleotide) is the primary electron carrier in the electron transport chain.", "ai_confidence": 0.97 },
+    { "question_number": "6", "ai_answer": "A", "ai_explanation": "Oxygen is the terminal electron acceptor in the ETC, forming water.", "ai_confidence": 0.99 },
+    { "question_number": "7", "ai_answer": "C", "ai_explanation": "DNA replication occurs in the S-phase of the cell cycle. The question asks for the stage — synthesis phase.", "ai_confidence": 0.88 },
+    { "question_number": "8", "ai_answer": "D", "ai_explanation": "Meiosis produces 4 haploid cells (n) from one diploid (2n) parent cell.", "ai_confidence": 0.96 },
+    { "question_number": "9", "ai_answer": "C", "ai_explanation": "Osmosis is the movement of water across a semipermeable membrane from low to high solute concentration.", "ai_confidence": 0.99 },
+    { "question_number": "10", "ai_answer": "A", "ai_explanation": "Active transport moves substances against the concentration gradient and requires ATP energy.", "ai_confidence": 0.97 }
+  ]
+}`)) +
+      section('Solver answers at a glance', table(
+        ['Q#','AI answer','AI confidence','Explanation (truncated)'],
+        [
+          ['','1','B',conf(0.99),'Mitochondria produce ATP via oxidative phosphorylation.'],
+          ['','2','D',conf(0.97),'Liver does not produce insulin — that is pancreatic beta cells.'],
+          ['','3','B',conf(0.98),'Krebs cycle occurs in mitochondrial matrix.'],
+          ['','4','A',conf(0.99),'Glycolysis converts glucose to pyruvate.'],
+          ['','5','C',conf(0.97),'NADH is the primary electron carrier in ETC.'],
+          ['','6','A',conf(0.99),'Oxygen is the terminal electron acceptor.'],
+          ['highlight','7','C',conf(0.88),'DNA replication occurs in S-phase of cell cycle.'],
+          ['','8','D',conf(0.96),'Meiosis produces 4 haploid cells.'],
+          ['','9','C',conf(0.99),'Osmosis: water across membrane, low → high solute.'],
+          ['','10','A',conf(0.97),'Active transport requires ATP, moves against gradient.'],
+        ]
+      ));
+    }
+  },
+
+  {
+    id: 8, name: 'Compare', kind: '⚙ System',
+    tagClass: 'tag-sys',
+    inputDesc: 'Extracted rows + Solver answers',
+    outputDesc: 'ComparedRow[] with agreement flags',
+    input() {
+      return section('Join logic', `<div style="font-size:12px;color:var(--text-dim);line-height:1.8">
+        Compare joins on <code>question_number</code>:<br>
+        &nbsp;&nbsp;• <strong>Marked answer</strong> (from extraction) = student's answer<br>
+        &nbsp;&nbsp;• <strong>AI answer</strong> (from solver) = independently reasoned answer<br>
+        &nbsp;&nbsp;• <code>agreement = (marked === ai_answer)</code><br>
+        &nbsp;&nbsp;• Disagreements are findings to inspect
+      </div>`) +
+      section('Extracted answers', table(
+        ['Q#','Marked answer','Confidence','needs_review'],
+        [
+          ['','1','B',conf(0.95),'—'],
+          ['','2','D',conf(0.88),'—'],
+          ['highlight','3','C',conf(0.71),pill('⚠ REVIEW','red')],
+          ['','4','A',conf(0.91),'—'],
+          ['','5','C',conf(0.87),'—'],
+          ['','6','A',conf(0.93),'—'],
+          ['highlight','7','B',conf(0.89),'—'],
+          ['','8','D',conf(0.82),'—'],
+          ['','9','C',conf(0.76),'—'],
+          ['','10','A',conf(0.84),'—'],
+        ]
+      )) +
+      section('AI answers (from Solver)', table(
+        ['Q#','AI answer','AI confidence'],
+        [
+          ['','1','B',conf(0.99)],
+          ['','2','D',conf(0.97)],
+          ['','3','B',conf(0.98)],
+          ['','4','A',conf(0.99)],
+          ['','5','C',conf(0.97)],
+          ['','6','A',conf(0.99)],
+          ['highlight','7','C',conf(0.88)],
+          ['','8','D',conf(0.96)],
+          ['','9','C',conf(0.99)],
+          ['','10','A',conf(0.97)],
+        ]
+      ));
+    },
+    output() {
+      return section('ComparedRow[] — final joined table', table(
+        ['Q#','Marked','AI','Agreement','Confidence','Disagreement reason / Notes'],
+        [
+          ['','1','B','B','<span class="agree">✓</span>',conf(0.95),'—'],
+          ['','2','D','D','<span class="agree">✓</span>',conf(0.88),'—'],
+          ['highlight','3','C','B','<span class="disagree">✗</span>',conf(0.71),'Validator flagged ambiguous mark (smudge). Validator chose C; AI chose B. '+pill('needs_review','red')],
+          ['','4','A','A','<span class="agree">✓</span>',conf(0.91),'Merged from pages [3,4]'],
+          ['','5','C','C','<span class="agree">✓</span>',conf(0.87),'—'],
+          ['','6','A','A','<span class="agree">✓</span>',conf(0.93),'—'],
+          ['highlight','7','B','C','<span class="disagree">✗</span>',conf(0.89),'AI answered C (DNA replication in S-phase), student marked B. Possible error. '+pill('needs_review','red')],
+          ['','8','D','D','<span class="agree">✓</span>',conf(0.82),'—'],
+          ['','9','C','C','<span class="agree">✓</span>',conf(0.76),'—'],
+          ['','10','A','A','<span class="agree">✓</span>',conf(0.84),'—'],
+        ]
+      )) +
+      section('Summary', `<div class="info-card">
+        <div class="info-row"><div class="info-key">Total questions</div><div class="info-val">10</div></div>
+        <div class="info-row"><div class="info-key">Agreements</div><div class="info-val"><span style="color:var(--green)">8 / 10</span></div></div>
+        <div class="info-row"><div class="info-key">Disagreements</div><div class="info-val"><span style="color:var(--red)">2 / 10</span> (Q3, Q7)</div></div>
+        <div class="info-row"><div class="info-key">Flagged for review</div><div class="info-val">${pill('Q3 — ambiguous mark + model disagreement','red')} ${pill('Q7 — AI/student answer mismatch','red')}</div></div>
+      </div>`);
+    }
+  },
+
+  {
+    id: 9, name: 'Export', kind: '⚙ System',
+    tagClass: 'tag-sys',
+    inputDesc: 'Final rows + schema',
+    outputDesc: 'CSV + Audit JSON',
+    input() {
+      return section('User schema (fields to export)', table(
+        ['Field name','Type','Role'],
+        [
+          ['','question_number','text','question_id'],
+          ['','question_text','text','question_body'],
+          ['','correct_answer','text','answer'],
+          ['','confidence','number','—'],
+          ['','needs_review','boolean','—'],
+          ['','ai_answer','text','—'],
+          ['','agreement','boolean','—'],
+        ]
+      )) +
+      section('Final rows to export (10 rows)', `<div style="font-size:12px;color:var(--text-dim);line-height:1.8">
+        Rows sorted by <code>question_number</code> ascending.<br>
+        Only schema-defined fields are written to CSV.<br>
+        Full audit data (source_snippet, validator_candidates, merged_from_pages) goes to sidecar JSON.
+      </div>`);
+    },
+    output() {
+      return section('CSV preview', `<div class="csv-pre"><span class="csv-header">question_number,question_text,correct_answer,confidence,needs_review,ai_answer,agreement</span>
+1,"Which of the following is the primary function of the mitochondria?",B,0.95,false,B,true
+2,"Which of the following is NOT a function of the liver?",D,0.88,false,D,true
+3,"The Krebs cycle occurs in the:",C,0.71,true,B,false
+4,"The process by which glucose is converted to pyruvate is called:",A,0.91,false,A,true
+5,"Which molecule carries electrons in the electron transport chain?",C,0.87,false,C,true
+6,"What is the terminal electron acceptor in the ETC?",A,0.93,false,A,true
+7,"DNA replication primarily occurs during which phase?",B,0.89,true,C,false
+8,"How many haploid cells does meiosis produce?",D,0.82,false,D,true
+9,"Osmosis is the movement of:",C,0.76,false,C,true
+10,"Which transport mechanism requires ATP?",A,0.84,false,A,true</div>`) +
+      `<details><summary>Audit JSON (sidecar) — full canonical data</summary><div class="details-body">` +
+      codeBlock(`{
+  "run_id": "run_20260525_143201",
+  "pdf": "sample_exam.pdf",
+  "mode": "review",
+  "format": "inline_marked",
+  "exported_at": "2026-05-25T14:38:04Z",
+  "rows": [
+    {
+      "question_number": "3",
+      "correct_answer": "C",
+      "needs_review": true,
+      "validator_candidates": [
+        { "source": "primary", "model": "gemini-3.1-flash-lite", "answer": "B", "confidence": 0.42 },
+        { "source": "secondary", "model": "gemma-4-31B-it",        "answer": "C", "confidence": 0.71 }
+      ],
+      "ai_answer": "B",
+      "ai_explanation": "Krebs cycle occurs in mitochondrial matrix.",
+      "agreement": false,
+      "disagreement_reason": "AI answered B (Mitochondrial matrix); student marked C (Inner mitochondrial membrane). Validator also disagreed between models.",
+      "source_snippet": "Q3 page 3 — smudged mark between B and C options"
+    },
+    {
+      "question_number": "4",
+      "correct_answer": "A",
+      "merged_from_pages": [3, 4],
+      "needs_review": false,
+      "ai_answer": "A",
+      "agreement": true
+    },
+    {
+      "question_number": "7",
+      "correct_answer": "B",
+      "needs_review": true,
+      "ai_answer": "C",
+      "ai_explanation": "DNA replication occurs in S-phase of cell cycle.",
+      "agreement": false,
+      "disagreement_reason": "AI answered C; student marked B. May indicate incorrect student answer."
+    }
+  ]
+}`) +
+      `</div></details>`;
+    }
+  },
+];
+
+// ─────────────────────────────────────────────────────────────────
+// Render
+// ─────────────────────────────────────────────────────────────────
+let activePhase = 1;
+
+function renderStepper() {
+  const el = document.getElementById('stepper');
+  el.innerHTML = PHASES.map((p, i) => `
+    <div class="step">
+      <button class="step-btn ${p.id === activePhase ? 'active' : ''}" onclick="setPhase(${p.id})">
+        <div class="step-num">${p.id}</div>
+        <div class="step-label">${p.name}</div>
+        <div class="step-kind">${p.kind}</div>
+      </button>
+      ${i < PHASES.length - 1 ? '<div class="step-arrow">›</div>' : ''}
+    </div>
+  `).join('');
+}
+
+function renderPhase(phase) {
+  const isAI = phase.kind.includes('🤖');
+  const isSys = phase.kind.includes('⚙');
+
+  document.getElementById('input-tag').className = `panel-tag ${phase.tagClass}`;
+  document.getElementById('input-tag').textContent = phase.kind;
+  document.getElementById('input-desc').textContent = phase.inputDesc;
+
+  document.getElementById('output-tag').className = `panel-tag ${phase.tagClass}`;
+  document.getElementById('output-tag').textContent = phase.kind;
+  document.getElementById('output-desc').textContent = phase.outputDesc;
+
+  document.getElementById('input-body').innerHTML = phase.input();
+  document.getElementById('output-body').innerHTML = phase.output();
+}
+
+function setPhase(id) {
+  activePhase = id;
+  renderStepper();
+  renderPhase(PHASES.find(p => p.id === id));
+  // scroll panels to top
+  document.getElementById('input-body').scrollTop = 0;
+  document.getElementById('output-body').scrollTop = 0;
+}
+
+// Initial render
+renderStepper();
+renderPhase(PHASES[0]);
+</script>
+</body>
+</html>

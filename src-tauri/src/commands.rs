@@ -9,8 +9,19 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
 
-fn make_pdfium() -> Pdfium {
-    Pdfium::default()
+fn make_pdfium() -> Result<Pdfium, String> {
+    // Resolve the DLL path relative to the running executable so it works in
+    // both dev (target/debug/) and production (installer dir).
+    let lib_path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("pdfium.dll")))
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "pdfium.dll".to_string());
+
+    Pdfium::bind_to_library(lib_path)
+        .map(Pdfium::new)
+        .map_err(|e| format!("failed to load pdfium: {e}"))
 }
 
 fn staging_dir_for(app: &AppHandle, run_id: &str) -> Result<PathBuf, String> {
@@ -27,7 +38,7 @@ pub fn triage_pdf(
     _run_id: String,
     password: Option<String>,
 ) -> Result<TriageResult, String> {
-    let pdfium = make_pdfium();
+    let pdfium = make_pdfium()?;
     triage::triage(&pdfium, &path, password.as_deref()).map_err(|e| format!("{e:#}"))
 }
 
@@ -44,7 +55,7 @@ pub fn rasterize_pdf(
     only_pages: Option<Vec<u32>>,
 ) -> Result<RasterizeResult, String> {
     let staging = staging_dir_for(&app, &run_id)?;
-    let pdfium = make_pdfium();
+    let pdfium = make_pdfium()?;
     pdf::rasterize(
         &pdfium,
         &path,

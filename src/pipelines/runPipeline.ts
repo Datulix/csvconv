@@ -39,6 +39,13 @@ import {
   type SolverQuestion,
 } from "./solver";
 import { compareAll, type ComparedRow } from "./compare";
+import {
+  startTrace,
+  beginPhase,
+  completePhase,
+  skipPhase,
+  finishTrace,
+} from "../lib/pipelineTrace";
 
 export interface PipelineProgress {
   stage: string;
@@ -154,6 +161,17 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
   const { apiKey, pdfPath, schema, mode, format, settings, runId, onProgress, signal } = args;
   const cache = new SqliteCacheBackend();
 
+  startTrace({
+    runId,
+    pdfPath,
+    pdfName: pdfPath.replace(/\\/g, "/").split("/").pop() ?? pdfPath,
+    mode,
+    format,
+    contentType: schema.content_type,
+    schemaName: schema.name,
+    startedAt: Date.now(),
+  });
+
   reportProgress(onProgress, { stage: "init", message: "Hashing PDF…" });
   const pdfSha256 = await invoke<string>("hash_pdf", { path: pdfPath });
   const sHash = await schemaHash(schema);
@@ -179,7 +197,14 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
   try {
     // 1. Triage
     reportProgress(onProgress, { stage: "triage", message: "Triaging PDF…" });
+    beginPhase("triage", "Triage", "system", { pdfPath, runId, dpi: settings.dpi });
     const triage = await triagePdf(pdfPath, runId);
+    completePhase("triage", {
+      pdfType: triage.pdf_type,
+      pageCount: triage.pages.length,
+      blankCount: triage.pages.filter((p) => p.is_blank).length,
+      pages: triage.pages,
+    });
 
     // 2. Rasterize all non-blank pages (or all pages if no blanks detected)
     const blankPages = triage.pages.filter((p) => p.is_blank).map((p) => p.page_number);
@@ -196,6 +221,12 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
       .map((p) => [p.page_number, p.skew_angle_deg]);
     const deskewPages = deskewPairs.map(([n]) => n);
 
+    beginPhase("rasterize", "Rasterize", "system", {
+      targetPages,
+      blankPages,
+      deskewPages,
+      dpi: settings.dpi,
+    });
     const raster = await rasterizePdf({
       path: pdfPath,
       dpi: settings.dpi,
@@ -203,6 +234,15 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
       deskewPages,
       skewAngles: deskewPairs,
       skipPages: blankPages,
+    });
+    completePhase("rasterize", {
+      pages: raster.pages.map((p) => ({
+        pageNumber: p.page_number,
+        width: p.width,
+        height: p.height,
+        deskewed: p.deskewed,
+        skipped: p.skipped,
+      })),
     });
 
     // 3. Base64-encode page images
@@ -237,6 +277,21 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
     });
 
     const extractorModel = modelForStage("extractor_model", settings);
+
+    beginPhase("detect", "Format Detection", "ai", {
+      contentType: schema.content_type,
+      mode,
+      confirmedFormat: format,
+      note: "Format is confirmed before runPipeline starts (see Convert page detector step).",
+    });
+    completePhase("detect", { confirmedFormat: format ?? "n/a (non-MCQ or answer mode)" });
+
+    beginPhase("extract", "Extract", "ai", {
+      batches: batches.map((b, i) => ({ batchIndex: i, pageNumbers: b.map((p) => p.pageNumber) })),
+      modelId: extractorModel,
+      format: format ?? "inferred",
+      batchSize,
+    });
 
     // 5. Run extractor in parallel with auto-split-on-RECITATION/TRUNCATION
     let doneBatches = 0;
@@ -284,9 +339,28 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
       },
     );
 
+    completePhase("extract", {
+      batchCount: batchResults.length,
+      failedPageCount: allFailedPages.length,
+      failedPages: allFailedPages.map((f) => ({ pageNumber: f.pageNumber, reason: f.reason })),
+      batches: batchResults,
+    });
+
     // 6. Merge across page boundaries
     reportProgress(onProgress, { stage: "merge", message: "Merging page-span questions…" });
+    const prePartials = batchResults.flatMap((b) =>
+      b.pages.flatMap((p) =>
+        p.rows
+          .filter((r) => r.is_partial)
+          .map((r) => ({ questionNumber: String(r.question_number ?? "?"), pageNumber: p.page_number })),
+      ),
+    );
+    beginPhase("merge", "Merge", "system", {
+      pageCount: batchResults.reduce((s, b) => s + b.pages.length, 0),
+      partialRows: prePartials,
+    });
     let merged = mergeAcrossPages(batchResults, { mergeSourceSnippets: true });
+    completePhase("merge", { mergedCount: prePartials.length, pages: merged.pages });
 
     // 7. Validator (only for MCQ; skip for non-MCQ content types since their extractors
     //    don't share the same row shape today).
@@ -296,6 +370,18 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
       const primaryModel = modelForStage("extractor_model", settings);
       const validatorModel = (settings.validator_model ?? settings.primary_model) as ModelId | null;
       const secondaryModel = validatorModel && validatorModel !== primaryModel ? validatorModel : null;
+      const lowConfRows = merged.pages.flatMap((p) =>
+        p.rows
+          .filter((r) => typeof r.confidence === "number" && r.confidence < VALIDATOR_CONFIDENCE_THRESHOLD)
+          .map((r) => ({ questionNumber: String(r.question_number ?? "?"), pageNumber: p.page_number, confidence: r.confidence })),
+      );
+      beginPhase("validate", "Validate", "ai", {
+        candidateCount: lowConfRows.length,
+        threshold: VALIDATOR_CONFIDENCE_THRESHOLD,
+        primaryModel,
+        secondaryModel,
+        lowConfRows,
+      });
 
       // Run validator per-batch (matching the extractor batching).
       const variant = (format ?? "inline_marked") as McqExtractorVariant;
@@ -328,6 +414,16 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
         }
       }
       merged = { pages: validatedPages };
+      completePhase("validate", { needsReviewCount, pages: validatedPages });
+    } else {
+      skipPhase(
+        "validate",
+        "Validate",
+        "ai",
+        schema.content_type !== "mcq"
+          ? `Content type is ${schema.content_type} — validator only runs for MCQ`
+          : "Validator disabled in settings",
+      );
     }
 
     if (signal?.aborted) throw new Error("aborted");
@@ -339,6 +435,10 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
         stage: "answer_key",
         message: `Parsing answer key from ${answerKeyPageNumbers.length} trailing page${answerKeyPageNumbers.length === 1 ? "" : "s"}…`,
       });
+      beginPhase("answer_key", "Answer Key", "ai", {
+        keyPages: answerKeyPageNumbers,
+        modelId: extractorModel,
+      });
       const keyImages = pageImages.filter((p) => answerKeyPageNumbers.includes(p.pageNumber));
       if (keyImages.length > 0) {
         answerKey = await runAnswerKeyParser({
@@ -349,7 +449,17 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
         });
         const patched = patchWithAnswerKey(merged, answerKey);
         merged = patched.batch;
+        completePhase("answer_key", { entries: answerKey.entries });
+      } else {
+        completePhase("answer_key", { note: "No key images found" });
       }
+    } else {
+      skipPhase(
+        "answer_key",
+        "Answer Key",
+        "ai",
+        format !== "answer_key_at_end" ? `Format is ${format ?? "not set"} — only runs for answer_key_at_end` : "No trailing pages identified",
+      );
     }
 
     // 9. Solver + Compare (Review and Answer modes, MCQ only)
@@ -359,6 +469,7 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
     if (schema.content_type === "mcq" && (mode === "review" || mode === "answer")) {
       reportProgress(onProgress, { stage: "solver", message: "Solving questions independently…" });
       const solverModel = modelForStage("solver_model", settings);
+      beginPhase("solve", "Solve", "ai", { modelId: solverModel, mode });
 
       // Build solver questions, attaching the relevant page image(s).
       const allRows: ExtractedRow[] = [];
@@ -407,14 +518,22 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
         });
       }
       const solverMap = indexSolverResults(solverResponses);
+      completePhase("solve", {
+        questionCount: allRows.length,
+        batchCount: solverBatches.length,
+        answers: solverResponses.flatMap((r) => (r as { questions?: unknown[] }).questions ?? []),
+      });
 
       // 10. Compare (Review mode only)
       if (mode === "review") {
         reportProgress(onProgress, { stage: "compare", message: "Comparing marked vs AI answers…" });
+        beginPhase("compare", "Compare", "system", { rowCount: allRows.length });
         const result = compareAll(allRows, solverMap);
         comparedRows = result.rows;
         compareSummary = result.summary;
+        completePhase("compare", { summary: compareSummary, rows: comparedRows });
       } else {
+        skipPhase("compare", "Compare", "system", `Mode is ${mode} — Compare only runs in review mode`);
         // Answer mode: attach ai_answer + ai_explanation + ai_confidence directly onto the row.
         comparedRows = allRows.map((row) => {
           const solved = solverMap.get(String(row.question_number ?? ""));
@@ -445,10 +564,14 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
           aiNeedsReviewCount += 1;
         }
       }
+    } else {
+      skipPhase("solve", "Solve", "ai", `Mode is ${mode} and content type is ${schema.content_type} — solver only runs for MCQ in review/answer mode`);
+      skipPhase("compare", "Compare", "system", `Solver did not run`);
     }
 
     // 11. Persist all rows to cache for the Review UI
     reportProgress(onProgress, { stage: "persist", message: "Saving rows to cache…" });
+    beginPhase("persist", "Persist", "system", { cacheKey });
     let totalRows = 0;
     const finalPages = merged.pages.map((page, _pi) => {
       const enrichedRows = page.rows.map((row) => {
@@ -488,6 +611,7 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
     }
 
     const allRowsOut: ExtractedRow[] = finalPages.flatMap((p) => p.rows);
+    completePhase("persist", { totalRows, cacheKey });
 
     await upsertRun({
       cache_key: cacheKey,
@@ -515,6 +639,8 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
       };
     });
 
+    finishTrace();
+
     return {
       cacheKey,
       rows: allRowsOut,
@@ -531,6 +657,7 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
       answerKey,
     };
   } catch (err) {
+    finishTrace();
     await upsertRun({
       cache_key: cacheKey,
       state: "crashed",
