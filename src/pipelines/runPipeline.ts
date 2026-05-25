@@ -16,6 +16,7 @@ import {
   type SqliteRowRecord,
 } from "../lib/sqliteCache";
 import type { ExamFormat } from "./detector";
+import { runDocumentAnalyzer, type DocumentAnalysisResult } from "./documentAnalyzer";
 import type { ExtractedBatch, ExtractedPage, ExtractedRow, ExtractorPageInput } from "./extractors/types";
 import { runInlineMarkedExtractor } from "./extractors/mcq_inlineMarked";
 import { runWrittenAnswerExtractor } from "./extractors/mcq_writtenAnswer";
@@ -95,7 +96,7 @@ function reportProgress(fn: ProgressFn | undefined, e: PipelineProgress) {
   if (fn) fn(e);
 }
 
-function modelForStage(stage: keyof Pick<AppSettings, "detector_model" | "extractor_model" | "validator_model" | "solver_model">, settings: AppSettings): ModelId {
+function modelForStage(stage: keyof Pick<AppSettings, "detector_model" | "analyzer_model" | "extractor_model" | "validator_model" | "solver_model">, settings: AppSettings): ModelId {
   const value = (settings[stage] ?? settings.primary_model) as ModelId | null;
   if (!value) throw new Error(`No model configured for stage "${stage}" (set a primary model in Settings)`);
   return value;
@@ -115,6 +116,7 @@ async function computeCacheKey(args: {
     args.format ?? "none",
     args.settings.primary_model ?? "none",
     args.settings.detector_model ?? "inherit",
+    args.settings.analyzer_model ?? "inherit",
     args.settings.extractor_model ?? "inherit",
     args.settings.validator_model ?? "inherit",
     args.settings.solver_model ?? "inherit",
@@ -160,11 +162,12 @@ async function mapWithConcurrency<I, O>(
 export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult> {
   const { apiKey, pdfPath, schema, mode, format, settings, runId, onProgress, signal } = args;
   const cache = new SqliteCacheBackend();
+  const pdfName = pdfPath.replace(/\\/g, "/").split("/").pop() ?? pdfPath;
 
   startTrace({
     runId,
     pdfPath,
-    pdfName: pdfPath.replace(/\\/g, "/").split("/").pop() ?? pdfPath,
+    pdfName,
     mode,
     format,
     contentType: schema.content_type,
@@ -257,13 +260,42 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
 
     if (signal?.aborted) throw new Error("aborted");
 
-    // 4. Plan extractor batches.
-    // For answer_key_at_end, skip the trailing answer-key pages from the body extractor.
+    // 4. Document Intelligence — full structural analysis of all pages
+    reportProgress(onProgress, { stage: "analyze", message: "Analyzing document structure…" });
+    const analyzerModel = modelForStage("analyzer_model", settings);
+    beginPhase("analyze", "Document Analysis", "ai", {
+      pageCount: pageImages.length,
+      modelId: analyzerModel,
+    });
+    let docAnalysis: DocumentAnalysisResult | null = null;
+    try {
+      docAnalysis = await runDocumentAnalyzer({
+        apiKey,
+        modelId: analyzerModel,
+        pages: pageImages,
+        pdfName,
+        signal,
+      });
+      completePhase("analyze", docAnalysis);
+    } catch (err) {
+      completePhase("analyze", { error: String(err) });
+      throw err;
+    }
+
+    if (signal?.aborted) throw new Error("aborted");
+
+    // 5. Plan extractor batches.
+    // For answer_key_at_end, skip the answer-key pages from the body extractor.
+    // Use exact page locations from document analysis when available; fall back to heuristic.
     const isAnswerKey = format === "answer_key_at_end" && mode !== "answer";
     let answerKeyPageNumbers: number[] = [];
     let bodyImages = pageImages;
     if (isAnswerKey) {
-      answerKeyPageNumbers = pickAnswerKeyPages(allPages.length);
+      if (docAnalysis && docAnalysis.answer_key_locations.length > 0) {
+        answerKeyPageNumbers = docAnalysis.answer_key_locations.map((l) => l.page_number);
+      } else {
+        answerKeyPageNumbers = pickAnswerKeyPages(allPages.length);
+      }
       bodyImages = pageImages.filter((p) => !answerKeyPageNumbers.includes(p.pageNumber));
     }
 
@@ -447,7 +479,7 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
           pages: keyImages,
           signal,
         });
-        const patched = patchWithAnswerKey(merged, answerKey);
+        const patched = patchWithAnswerKey(merged, answerKey, docAnalysis?.page_map ?? []);
         merged = patched.batch;
         completePhase("answer_key", { entries: answerKey.entries });
       } else {

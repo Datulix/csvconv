@@ -1,6 +1,6 @@
-export type ModelId = "gemini-3.1-flash-lite" | "gemma-4-31B-it";
+export type ModelId = "gemini-3.1-flash-lite" | "gemma-4-31B-it" | "gemini-3.5-flash";
 
-export type PipelineStage = "detector" | "extractor" | "validator" | "solver";
+export type PipelineStage = "detector" | "analyzer" | "extractor" | "validator" | "solver";
 
 export interface ModelInfo {
   id: ModelId;
@@ -27,6 +27,14 @@ export const SUPPORTED_MODELS: ModelInfo[] = [
     inputPricePerMTok: 0.25,
     outputPricePerMTok: 1.0,
     notes: "Open-weights model via Google AI Studio. Confirm pricing in Settings.",
+  },
+  {
+    id: "gemini-3.5-flash",
+    label: "Gemini 3.5 Flash",
+    vision: true,
+    inputPricePerMTok: 0.075,
+    outputPricePerMTok: 0.30,
+    notes: "Recommended for full-document intelligence analysis. Confirm pricing in Google AI Studio.",
   },
 ];
 

@@ -4,6 +4,7 @@ import type { ModelId } from "./models";
 export interface AppSettings {
   primary_model: ModelId | null;
   detector_model: ModelId | null;
+  analyzer_model: ModelId | null;
   extractor_model: ModelId | null;
   validator_model: ModelId | null;
   solver_model: ModelId | null;
@@ -17,6 +18,7 @@ export interface AppSettings {
 export const DEFAULT_SETTINGS: AppSettings = {
   primary_model: null,
   detector_model: null,
+  analyzer_model: null,
   extractor_model: null,
   validator_model: null,
   solver_model: null,

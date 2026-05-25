@@ -144,16 +144,51 @@ question number followed by the answer letter (e.g., "1. A", "1) B", "Q1: C",
 
 For each entry on the visible pages, return:
   - question_number: the printed identifier (string, e.g., "1", "23a", "Q5")
+  - section: the section label if the answer key covers multiple sections
+    (e.g., "A", "Section A", "B"). Omit or set to null for single-section exams.
   - answer: a single uppercase letter A-E
   - confidence: 0-1 based on legibility / handwriting clarity
   - notes: optional, any ambiguity (e.g., "could be B or D — picked B based on
     stroke direction")
 
-Return strict JSON: { entries: [{ question_number, answer, confidence, notes }] }.
+Return strict JSON: { entries: [{ question_number, section, answer, confidence, notes }] }.
 
 Critical:
+- If the answer key has MULTIPLE sections (e.g., "Section A" and "Section B") where both
+  start from question 1, you MUST include the section field on every entry so that answers
+  from different sections with the same question number can be distinguished.
 - If a question lists multiple letters (e.g., "1. A or C"), pick the one written
   first and set confidence < 0.5.
 - If you can't make out the letter at all, omit that entry rather than guessing.
 - Preserve question_number as a string. "1" and "01" are different identifiers
   unless the document is clearly zero-padded — in which case strip leading zeros.`;
+
+export const DOCUMENT_ANALYSIS_PROMPT = `You are a document-structure analyst. You receive every page of an exam PDF as images.
+Your job is to produce a complete structural map of the document.
+
+For EVERY page, classify it and record:
+- page_number: the page number as labeled (e.g., PAGE 1, PAGE 2)
+- content_type: one of "questions" | "answer_key" | "instructions" | "blank" | "mixed"
+- section_label: the section name if this page belongs to a named section (e.g. "Section A"),
+  or null if there are no named sections or this page has none
+- question_range_start: the number of the first question on this page (null if no questions)
+- question_range_end: the number of the last question on this page (null if no questions)
+
+Also report at the document level:
+- total_questions: total number of questions in the entire document (null if you cannot determine)
+- sections: named sections with their question ranges (empty array if no sections exist)
+- answer_key_locations: EVERY page that contains an answer key. For multi-section exams where each
+  section has its own key, list each as a separate entry with its section_label and question range.
+- cross_page_questions: questions whose stem starts on one page and concludes on the next page
+- content_patterns: contiguous groups of questions that share the same format type
+  (e.g., Q1-10 are mcq, Q11-12 are true_false)
+- exam_metadata: title, date, subject — set to null for any you cannot read
+- layout: columns (1, 2, or 3), has_math (boolean), primary_language (ISO 639-1 code e.g. "en")
+- notes: any unusual observations (e.g., "answer key is handwritten", "two columns of questions")
+
+IMPORTANT RULES:
+- Preserve question numbers exactly as printed (e.g., "1", "23a", "Q5").
+- If multiple answer keys exist for different sections, each gets its own entry in
+  answer_key_locations with a non-null section_label.
+- Be precise about question ranges — count carefully rather than estimating.
+- Return strict JSON.`;

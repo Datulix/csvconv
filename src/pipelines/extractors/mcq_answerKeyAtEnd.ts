@@ -14,6 +14,7 @@ import {
   buildMcqZodSchema,
 } from "./schemaBuilders";
 import type { ExtractedBatch, ExtractorPageInput, OptionLetter } from "./types";
+import type { PageMapEntry } from "../documentAnalyzer";
 
 /**
  * Two-phase MCQ extractor for answer_key_at_end format.
@@ -92,6 +93,7 @@ export async function runAnswerKeyBodyExtractor(
 /** Schema for one entry parsed out of an answer-key page. */
 export const AnswerKeyEntrySchema = z.object({
   question_number: z.string(),
+  section: z.string().optional(),
   answer: z.enum(OPTION_LETTERS),
   confidence: z.number().min(0).max(1),
   notes: z.string().optional(),
@@ -112,6 +114,7 @@ const ANSWER_KEY_RESPONSE_SCHEMA: ResponseSchema = {
         type: "object",
         properties: {
           question_number: { type: "string" },
+          section: { type: "string" },
           answer: { type: "string", enum: [...OPTION_LETTERS] },
           confidence: { type: "number" },
           notes: { type: "string" },
@@ -164,6 +167,11 @@ export async function runAnswerKeyParser(args: RunAnswerKeyParserArgs): Promise<
 /**
  * Apply an answer-key map onto body-extracted rows in-place. Returns counts for the
  * orchestrator to record in audit (matched, unmatched body rows, unmatched key entries).
+ *
+ * When the key has section-labeled entries (multi-section exams), lookup uses a compound
+ * key `"<section>::<question_number>"`. The page map from document analysis is used to
+ * derive which section each body page belongs to, enabling correct cross-section matching.
+ * Falls back to bare question_number lookup when sections are absent.
  */
 export interface PatchSummary {
   matched: number;
@@ -171,23 +179,43 @@ export interface PatchSummary {
   unmatchedKeyEntries: AnswerKeyEntry[];
 }
 
+function compoundKey(section: string | null | undefined, qn: string): string {
+  return section ? `${section}::${qn}` : qn;
+}
+
 export function patchWithAnswerKey(
   body: ExtractedBatch,
   key: AnswerKeyResult,
+  pageMap: PageMapEntry[] = [],
 ): { batch: ExtractedBatch; summary: PatchSummary } {
-  const keyMap = new Map<string, AnswerKeyEntry>();
-  for (const entry of key.entries) {
-    keyMap.set(entry.question_number, entry);
+  // Build a page-number → section_label lookup from the document analysis page map
+  const pageSectionMap = new Map<number, string | null>();
+  for (const entry of pageMap) {
+    pageSectionMap.set(entry.page_number, entry.section_label ?? null);
   }
-  const matchedNumbers = new Set<string>();
+
+  // Build keyMap with compound keys when sections are present
+  const keyMap = new Map<string, AnswerKeyEntry>();
+  const hasSections = key.entries.some((e) => e.section);
+  for (const entry of key.entries) {
+    keyMap.set(compoundKey(hasSections ? entry.section : null, entry.question_number), entry);
+  }
+
+  const matchedKeys = new Set<string>();
   let matched = 0;
   const unmatchedBodyRows: Array<{ page_number: number; question_number: string }> = [];
 
   for (const page of body.pages) {
+    const pageSection = pageSectionMap.get(page.page_number) ?? null;
     for (const row of page.rows) {
       const qn = String(row.question_number ?? "");
-      const entry = keyMap.get(qn);
+      // Try compound key first (section-aware), then fall back to bare question number
+      const entry =
+        keyMap.get(compoundKey(hasSections ? pageSection : null, qn)) ??
+        (hasSections ? keyMap.get(qn) : undefined);
+
       if (entry) {
+        const ck = compoundKey(hasSections ? entry.section : null, entry.question_number);
         row.correct_answer = entry.answer as OptionLetter;
         if (typeof row.confidence === "number") {
           row.confidence = Math.min(row.confidence, entry.confidence);
@@ -198,7 +226,7 @@ export function patchWithAnswerKey(
           const existingNotes = (row.notes as string | undefined) ?? "";
           row.notes = existingNotes ? `${existingNotes} · key: ${entry.notes}` : `key: ${entry.notes}`;
         }
-        matchedNumbers.add(qn);
+        matchedKeys.add(ck);
         matched += 1;
       } else {
         const existingNotes = (row.notes as string | undefined) ?? "";
@@ -213,7 +241,9 @@ export function patchWithAnswerKey(
     }
   }
 
-  const unmatchedKeyEntries = key.entries.filter((e) => !matchedNumbers.has(e.question_number));
+  const unmatchedKeyEntries = key.entries.filter(
+    (e) => !matchedKeys.has(compoundKey(hasSections ? e.section : null, e.question_number)),
+  );
 
   return { batch: body, summary: { matched, unmatchedBodyRows, unmatchedKeyEntries } };
 }

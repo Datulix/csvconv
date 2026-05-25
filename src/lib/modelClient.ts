@@ -88,6 +88,7 @@ export class RateLimitError extends Error {
 const DEFAULT_CONCURRENCY: Record<string, number> = {
   "gemini-3.1-flash-lite": 3,
   "gemma-4-31B-it": 3,
+  "gemini-3.5-flash": 2,
 };
 
 const PER_MODEL_MAX_PAYLOAD_BYTES: Record<string, number> = {

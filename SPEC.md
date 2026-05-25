@@ -62,7 +62,8 @@ csvconv/
 │   │   └── ReviewTable.tsx    populates incrementally
 │   ├── pipelines/
 │   │   ├── orchestrator.ts    wires stages into a streaming graph
-│   │   ├── detector.ts        MCQ format detector
+│   │   ├── detector.ts        MCQ format detector (2-3 sample pages → format classification)
+│   │   ├── documentAnalyzer.ts  full-document intelligence (all pages → structural map)
 │   │   ├── extractors/
 │   │   │   ├── mcq_inlineMarked.ts
 │   │   │   ├── mcq_writtenAnswer.ts
@@ -130,7 +131,15 @@ PDF in
 │ Rasterizer (Rust) — JPEGs to staging dir; skips blank pages, │
 │ applies deskew/contrast to scanned-skewed pages              │
 └──────────────────────────────────────────────────────────────┘
-   │ page images
+   │ page images (all non-blank pages, base64-encoded)
+   ▼
+┌──────────────────────────────────────────────────────────────┐
+│ Document Intelligence (ALL pages → structural map)           │
+│  • per-page: content_type, section_label, question range     │
+│  • answer_key_locations (exact pages, per section)           │
+│  • cross_page_questions, content_patterns, exam_metadata     │
+└──────────────────────────────────────────────────────────────┘
+   │ DocumentAnalysisResult (falls back to heuristics on error)
    ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ Detector (MCQ only, mode ≠ Answer-from-scratch; 2-3 pages)   │
@@ -195,6 +204,37 @@ Runs before rasterization. Implemented in Rust (`src-tauri/src/triage.rs`), prod
 Triage runs synchronously before the streaming pipeline begins (it's a fast local pass, no LLM, typically <1s for 100 pages). Its results are persisted to a `triage` cache entry so resume doesn't redo it.
 
 Note: this stage **does not** classify the document's MCQ format — that's still the Detector's job (LLM-based, §4.1). Triage is purely about per-page quality and rasterization hints.
+
+### 4.1.2 Document Intelligence stage
+
+Runs **after** rasterization and base64 encoding, **before** batch planning and extraction. Sends every rasterized page to the AI in a single call and returns a `DocumentAnalysisResult` that the rest of the pipeline uses in place of heuristics.
+
+**Why all pages?** The 2-3 sample approach used by the Detector is sufficient to classify the marking format but insufficient to locate the answer key exactly (especially when there are multiple sections with independent answer keys on different pages), identify question ranges per page, or detect cross-page question splits.
+
+**Output fields** (`DocumentAnalysisResult`):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `total_questions` | `number \| null` | Total question count across the document |
+| `sections` | `DocumentSection[]` | Named sections (label, question range) — empty if no sections |
+| `page_map` | `PageMapEntry[]` | Per-page: `content_type`, `section_label`, `question_range_start/end` |
+| `answer_key_locations` | `AnswerKeyLocation[]` | Every page containing an answer key, with its section and question range |
+| `cross_page_questions` | `CrossPageQuestion[]` | Questions whose stem starts on one page and ends on the next |
+| `content_patterns` | `ContentPattern[]` | Groups of questions sharing the same type (mcq, true_false, written, …) |
+| `exam_metadata` | object | `title`, `date`, `subject` (all nullable) |
+| `layout` | object | `columns` (1–3), `has_math`, `primary_language` |
+| `notes` | string | Unusual observations |
+
+**Pipeline integration:**
+
+- `answer_key_locations` replaces the `pickAnswerKeyPages` heuristic (last 5 pages min) for `answer_key_at_end` PDFs — the extractor now receives only the exact pages identified by the analysis. If `answer_key_locations` is empty (analysis returned no results or failed), the heuristic runs as a fallback.
+- `page_map[].section_label` is passed to `patchWithAnswerKey` so it can match answer-key entries to body rows using compound keys (`"<section>::<question_number>"`), correctly handling multi-section exams where both sections start at Q1.
+- `cross_page_questions` is recorded in audit as a merge hint (full use deferred to v2).
+- If the AI call fails for any reason, a warning is recorded in the pipeline trace and all downstream stages fall back to heuristics as if the step had not run. The pipeline never hard-fails on an analysis error.
+
+**Model:** Uses the `analyzer_model` setting (falls back to `primary_model`). Recommended: `gemini-3.5-flash`.
+
+**Implementation:** `src/pipelines/documentAnalyzer.ts` — `runDocumentAnalyzer(args)`.
 
 ### 4.2 Streaming mechanics
 
@@ -437,7 +477,42 @@ When the user clicks "Test on 1 page" in the schema editor:
 
 ## 6. Prompts
 
-### 6.1 MCQ Detector
+### 6.1 Document Intelligence (all pages)
+
+Runs on every rasterized page. Returns the structural map described in §4.1.2. Implemented in `src/pipelines/prompts.ts` as `DOCUMENT_ANALYSIS_PROMPT`.
+
+```
+You are a document-structure analyst. You receive every page of an exam PDF as images.
+Your job is to produce a complete structural map of the document.
+
+For EVERY page, classify it and record:
+- content_type: "questions" | "answer_key" | "instructions" | "blank" | "mixed"
+- section_label: the section name if this page belongs to a named section (e.g. "Section A"),
+  or null if there are no named sections or this page has none
+- question_range_start / question_range_end: the first and last question number on this page
+  (null if no questions)
+
+Also report at the document level:
+- total_questions: total number of questions in the entire document (null if uncertain)
+- sections: named sections with their question ranges (empty array if no sections)
+- answer_key_locations: EVERY page containing an answer key. For multi-section exams where
+  each section has its own key, list each as a separate entry with its section_label and range.
+- cross_page_questions: questions whose stem starts on one page and ends on the next
+- content_patterns: contiguous groups of questions sharing the same format type
+  (e.g., Q1-10 are mcq, Q11-12 are true_false)
+- exam_metadata: title, date, subject — null for any you cannot read
+- layout: columns (1/2/3), has_math, primary_language (ISO 639-1)
+- notes: any unusual observations
+
+IMPORTANT:
+- If multiple answer keys exist for different sections, each gets its own entry in
+  answer_key_locations with a non-null section_label.
+- Preserve question_number strings exactly as printed (e.g., "1", "23a", "Q5").
+- Be precise about question ranges — count carefully rather than estimating.
+- Return strict JSON.
+```
+
+### 6.2 MCQ Detector
 
 Runs only when `content_type=mcq` and `mode ≠ "Answer from scratch"`.
 
@@ -460,7 +535,7 @@ Be conservative: prefer mixed_or_unclear if ambiguous.
 Return strict JSON.
 ```
 
-### 6.2 MCQ inline-marked extractor
+### 6.3 MCQ inline-marked extractor
 
 Fixed system prompt + dynamic per-field block from user's schema.
 
@@ -511,9 +586,9 @@ App-managed canonical fields always extracted alongside the user's declared fiel
 
 `mcq_type` lets downstream consumers handle "except" questions differently from "best answer" questions (Anki cards for negation questions, for example, benefit from explicit "select WRONG answer" framing).
 
-### 6.3 MCQ written-answer / answer-key-at-end extractors
+### 6.4 MCQ written-answer / answer-key-at-end extractors
 
-Same skeleton as 6.2 with format-specific variations:
+Same skeleton as 6.3 with format-specific variations:
 - **written_answer**: "the answer is indicated by a handwritten or printed letter near each question stem" instead of visual marks.
 - **answer_key_at_end**: runs in two passes that interact specially with the streaming model.
 
@@ -522,18 +597,23 @@ Same skeleton as 6.2 with format-specific variations:
 This format breaks the simple linear stream because `correct_answer` for body-page questions lives on a separate (typically end-of-PDF) page. v1 approach:
 
 1. Body-page rows are extracted and emitted with `correct_answer=null` and a per-row flag `awaiting_answer_key=true`. They flow through Validator and into the Review UI immediately so the user sees structure.
-2. In parallel, the orchestrator runs an answer-key extractor on the last N pages (heuristic: last 5% or last 5 pages, whichever is more, capped at 20). This produces a `{question_number → letter, confidence}` map.
-3. When the key map is ready, a patch pass updates each pending row: sets `correct_answer`, clears `awaiting_answer_key`, recomputes `needs_review` for the row.
-4. Patched rows update in place in the Review UI (using the row identity tuple from §8).
-5. If the key extractor returns an answer for a `question_number` that wasn't extracted from the body, record it in `audit.unmatched_key_entries` for user review.
-6. If a body-page row has `question_number` not present in the key map after the key pass completes, leave `correct_answer=null` and set `needs_review=true` with notes "no entry in answer key".
-7. Solver (Review/Answer modes) and Compare wait for the key patch to complete on a row before consuming it. This means Time-to-First-Solved-Row in Review mode for `answer_key_at_end` PDFs is roughly the same as for `inline_marked` (since solver doesn't need the marked answer to do its work — it can run on body rows immediately). Compare just waits for the patch.
+2. The orchestrator determines which pages contain the answer key using `answer_key_locations` from the Document Intelligence step (§4.1.2). If that result is empty or unavailable, it falls back to the heuristic (last 5% or last 5 pages, whichever is more, capped at 20).
+3. An answer-key extractor runs on those exact pages. The answer key prompt instructs the model to include a `section` field (e.g., `"A"`, `"Section B"`) on every entry when the key covers multiple sections, so answers from sections whose question numbering overlaps (both start at Q1) can be distinguished.
+4. When the key map is ready, a patch pass updates each pending row: sets `correct_answer`, clears `awaiting_answer_key`, recomputes `needs_review`. The patch uses compound keys (`"<section>::<question_number>"`) when sections are present, derived from the `page_map[].section_label` values for each body page. Falls back to bare `question_number` matching when no sections exist.
+5. Patched rows update in place in the Review UI (using the row identity tuple from §8).
+6. If the key extractor returns an answer for a `question_number` that wasn't extracted from the body, record it in `audit.unmatched_key_entries` for user review.
+7. If a body-page row has `question_number` not present in the key map after the key pass completes, leave `correct_answer=null` and set `needs_review=true` with notes "no entry in answer key".
+8. Solver (Review/Answer modes) and Compare wait for the key patch to complete on a row before consuming it. This means Time-to-First-Solved-Row in Review mode for `answer_key_at_end` PDFs is roughly the same as for `inline_marked` (since solver doesn't need the marked answer to do its work — it can run on body rows immediately). Compare just waits for the patch.
 
 The "answer key processing" stage is its own pipeline node with its own progress indicator in the Processing UI.
 
-v2 optimization: detector pre-scans to identify the answer-key page range and the orchestrator schedules those pages **first** so the key map is ready before body rows arrive.
+#### Multi-section answer key handling
 
-### 6.4 Flashcard extractor
+Exams that split questions into independent sections (e.g., "Section A: Q1–25, Section B: Q1–20") each with their own answer key present a matching challenge: both sections use overlapping question numbers. The answer key parser is instructed to emit a `section` field per entry; `patchWithAnswerKey` then builds compound keys (`"Section A::1"`, `"Section B::1"`) and looks up body rows by their page's section label from the document analysis page map. If no section labels are found, the logic degrades gracefully to bare question_number matching (single-section behavior).
+
+Implementation: `AnswerKeyEntrySchema.section` (optional string) in `mcq_answerKeyAtEnd.ts`; `patchWithAnswerKey(body, key, pageMap)` accepts the page map as a third argument.
+
+### 6.5 Flashcard extractor
 
 ```
 You are extracting flashcard-style content from study material pages.
@@ -559,7 +639,7 @@ matched to an ambiguous or wrong-feeling definition gets LOW confidence.
 Return strict JSON.
 ```
 
-### 6.5 Q&A pair extractor
+### 6.6 Q&A pair extractor
 
 ```
 You are extracting question-and-answer pairs from pages of study material
@@ -579,7 +659,7 @@ confidence reflects certainty in the Q→A pairing being correct.
 Return strict JSON.
 ```
 
-### 6.6 Solver (MCQ Review / Answer modes)
+### 6.7 Solver (MCQ Review / Answer modes)
 
 Sent per batch of 5–10 questions, grouped by source page where possible. Always includes the page image(s) per question (see §4.5).
 
@@ -613,7 +693,7 @@ Review UI filter chips: `All | Agreements | Disagreements | AI declined | No mar
 
 Convention: marked answer is treated as truth; AI disagreements are surfaced as **the AI's findings to inspect**, not as proof the marked answer is wrong.
 
-### 6.7 Validator (cross-model + disagreement)
+### 6.8 Validator (cross-model + disagreement)
 
 The v1 validator does **not** rely on self-reported confidence alone (Gemini confidence is poorly calibrated). Instead:
 
@@ -712,7 +792,7 @@ After CSV export, the run remains in cache. A "Re-export" action in run history 
 | ------------------------ | ----------------------------- | ------------------------------------------------------ |
 | Google AI Studio API key | (none — required)             | Stored in OS keychain via `keyring`. Setup flow shows a privacy warning before key entry (§9.2). |
 | Primary model            | (none — user must pick)       | One of the supported models (§9.1); applied to all stages by default |
-| Per-stage model override | inherit from primary          | Override for detector / extractor / validator / solver |
+| Per-stage model override | inherit from primary          | Override for detector / **analyzer** / extractor / validator / solver |
 | Validator cross-model    | Auto                          | If both models configured, validator uses the non-primary model. Otherwise falls back to single-model re-prompt. |
 | Rasterization DPI        | 300                           | User prioritized accuracy                              |
 | Pages per batch          | 10                            | User-tunable                                           |
@@ -730,12 +810,13 @@ After CSV export, the run remains in cache. A "Re-export" action in run history 
 
 Both available via Google AI Studio API and accessed through `@google/genai`. User's single API key works for both.
 
-| Model ID                  | Vision | Use for                                  |
+| Model ID                  | Vision | Recommended for                          |
 | ------------------------- | ------ | ---------------------------------------- |
 | `gemini-3.1-flash-lite`   | yes    | Detector / Extractor / Solver / Validator |
-| `gemma-4-31B-it`   | yes    | Detector / Extractor / Solver / Validator |
+| `gemma-4-31B-it`          | yes    | Detector / Extractor / Solver / Validator |
+| `gemini-3.5-flash`        | yes    | **Document Intelligence (Analyzer)** — capable model for full-document structural analysis |
 
-No default model — user must pick a primary per run. "Advanced" panel allows per-stage overrides. Cost preview updates live, broken down per stage. New models added by registering them in `lib/modelClient.ts` (one config object: id, label, vision-capable, RPM, max request size, pricing).
+No default model — user must pick a primary per run. "Advanced" panel allows per-stage overrides including the new `analyzer_model` slot. Cost preview updates live, broken down per stage. New models added by registering them in `lib/models.ts` (id, label, vision, pricing) and `lib/modelClient.ts` (concurrency entry).
 
 If the user picks both models across stages (e.g., one for primary, the other as a stage override), the validator automatically uses the non-primary model for cross-check (§6.7). A UI hint surfaces this: "Configure both models in per-stage settings to enable cross-model validation."
 
@@ -780,7 +861,7 @@ cache_key = sha256(
   schema_hash,            // stable hash of user schema (fields, types, content_type)
   page_range,
   mode,
-  per_stage_models,       // detector, extractor, validator, solver model IDs
+  per_stage_models,       // detector, analyzer, extractor, validator, solver model IDs
   dpi,
   batch_size
 )
@@ -830,21 +911,22 @@ On reopen: hash the PDF, look up by `cache_key`, resume from last successful bat
 4. Model client wrapper (`@google/genai` + per-model RPM tracking + request-size pre-check + zod validation + retries + auto-split-on-truncation in `batching.ts`)
 5. Streaming queue primitives (`lib/queues.ts`) + orchestrator skeleton + resume protocol (`lib/resume.ts`)
 6. Schema editor UI with `content_type` selector, role filtering, preset library, `schema_hash` (with goldens test)
-7. MCQ detector pipeline + UI confirmation step (low-confidence prompts user)
-8. Mode picker UI (conditional on content_type=mcq) with per-stage cost preview (ranges)
-9. MCQ inline-marked extractor with dynamic prompt builder
-10. Merge stage (page-span stitching)
-11. MCQ written-answer extractor
-12. MCQ answer-key-at-end extractor (two-phase + join)
-13. Validator with cross-model disagreement check (fallback to single-model re-prompt)
-14. Solver pipeline (vision-enabled, batched by source page, MCQ only)
-15. Compare logic (Review mode)
-16. SQLite cache (rich key) with stage-independent resume
-17. Streaming Review UI (incremental population in `(page_number, row_index)` order with skeleton rows; distinct needs_review vs ai_needs_review states; per-row re-solve; per-batch retry; user-edit tracking; skipped-pages collapsible group)
-18. CSV + audit JSON export
-19. Flashcard and Q&A pair extractors (proves content-type extensibility)
-20. Staging cleanup on run finalize / app start
-21. Tauri Windows packaging (`.exe` build) — including code signing setup (acquire cert OR document workaround for unsigned builds)
+7. **Document Intelligence pipeline** (`documentAnalyzer.ts` + `analyzer_model` setting) — full-page vision analysis producing structural map (page types, question ranges, answer-key locations, sections, cross-page questions, exam metadata)
+8. MCQ detector pipeline + UI confirmation step (low-confidence prompts user)
+9. Mode picker UI (conditional on content_type=mcq) with per-stage cost preview (ranges)
+10. MCQ inline-marked extractor with dynamic prompt builder
+11. Merge stage (page-span stitching)
+12. MCQ written-answer extractor
+13. MCQ answer-key-at-end extractor (two-phase + join, now using document analysis for exact answer-key page locations and section labels for compound-key matching in multi-section exams)
+14. Validator with cross-model disagreement check (fallback to single-model re-prompt)
+15. Solver pipeline (vision-enabled, batched by source page, MCQ only)
+16. Compare logic (Review mode)
+17. SQLite cache (rich key, includes `analyzer_model`) with stage-independent resume
+18. Streaming Review UI (incremental population in `(page_number, row_index)` order with skeleton rows; distinct needs_review vs ai_needs_review states; per-row re-solve; per-batch retry; user-edit tracking; skipped-pages collapsible group)
+19. CSV + audit JSON export
+20. Flashcard and Q&A pair extractors (proves content-type extensibility)
+21. Staging cleanup on run finalize / app start
+22. Tauri Windows packaging (`.exe` build) — including code signing setup (acquire cert OR document workaround for unsigned builds)
 
 ## 13. Deferred (v2+)
 

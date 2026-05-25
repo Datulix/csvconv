@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 pub struct AppSettings {
     pub primary_model: Option<String>,
     pub detector_model: Option<String>,
+    pub analyzer_model: Option<String>,
     pub extractor_model: Option<String>,
     pub validator_model: Option<String>,
     pub solver_model: Option<String>,
@@ -22,6 +23,7 @@ impl Default for AppSettings {
         Self {
             primary_model: None,
             detector_model: None,
+            analyzer_model: None,
             extractor_model: None,
             validator_model: None,
             solver_model: None,
