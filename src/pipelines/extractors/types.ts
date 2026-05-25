@@ -75,6 +75,10 @@ export interface CanonicalMcqRow {
   notes: string;
   source_snippet: string;
   figures?: FigureCrop[];
+  /** question_number of the anchor question that provides the shared context, or null if standalone. */
+  depends_on?: string | null;
+  /** Short label shared by all questions in the same case/scenario/passage group, or null if standalone. */
+  context_group?: string | null;
 }
 
 /**
@@ -102,4 +106,5 @@ export interface ExtractorPageInput {
   pageNumber: number;
   base64: string;
   mimeType?: string;
+  has_images?: boolean;
 }

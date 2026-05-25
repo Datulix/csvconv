@@ -59,6 +59,8 @@ function buildFlashcardResponseSchema(schema: Schema): ResponseSchema {
     confidence: { type: "number" },
     notes: { type: "string" },
     source_snippet: { type: "string" },
+    depends_on: { type: "string", nullable: true },
+    context_group: { type: "string", nullable: true },
     figures: {
       type: "array",
       items: {
@@ -114,6 +116,8 @@ function buildFlashcardZodSchema(schema: Schema): z.ZodTypeAny {
     confidence: z.number().min(0).max(1),
     notes: z.string(),
     source_snippet: z.string(),
+    depends_on: z.string().nullable().optional(),
+    context_group: z.string().nullable().optional(),
     figures: z.array(z.object({
       ymin: z.number().int().min(0).max(1000),
       xmin: z.number().int().min(0).max(1000),
@@ -170,7 +174,7 @@ export async function runFlashcardExtractor(
 
   const parts: ContentPart[] = [];
   for (const page of args.pages) {
-    parts.push({ kind: "text", text: `PAGE ${page.pageNumber}:` });
+    parts.push({ kind: "text", text: `PAGE ${page.pageNumber}${page.has_images ? " [this page contains figures/images]" : ""}:` });
     parts.push({
       kind: "image",
       mimeType: page.mimeType ?? "image/jpeg",

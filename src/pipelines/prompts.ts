@@ -1,3 +1,19 @@
+export const CONTEXT_DEPENDENCY_PROMPT_BLOCK = `
+
+Context dependency detection:
+Some documents present a clinical case, reading passage, scenario, or data set and then ask several questions about it. These follow-up questions cannot be understood or answered without that shared context.
+
+For every extracted question, populate two fields:
+- depends_on: if this question requires context established by a preceding NUMBERED question, set this to that question's question_number string. Otherwise null.
+- context_group: if this question belongs to a group sharing a common case/scenario/passage, assign a short consistent label shared by every question in the group (e.g., "Case 1", "Scenario A", "Passage 2"). If the question is fully standalone, set to null.
+
+Rules:
+1. The FIRST question that introduces or appears alongside the shared context gets depends_on=null and context_group set to the group label.
+2. All SUBSEQUENT questions that require that same context get depends_on set to the first question's question_number AND the same context_group label.
+3. If the shared context appears as an unnumbered preamble (not attached to any question number), all questions in the group get depends_on=null and context_group set to the group label.
+4. A fully standalone question gets depends_on=null and context_group=null.
+5. All questions in the same group MUST use the exact same context_group string — consistency is critical.`;
+
 export const FIGURES_PROMPT_BLOCK = `
 
 Figures, diagrams & complex tables:
@@ -5,7 +21,8 @@ Figures, diagrams & complex tables:
 - For each, emit one entry in the figures array with: normalized bounding box on a 0–1000 scale relative to the page image (ymin, xmin, ymax, xmax); a concise explanation of what it shows; and a kind label.
 - Be generous with bounds — include axis labels, legends, captions, and a thin margin around the visual. Tight crops that clip labels are a defect.
 - Do not emit a box for plain prose text, equations rendered as text, or single-line tables that fit in a string field. Do not emit a single box covering the entire page.
-- If a question has no associated visual, omit the figures field entirely (do not return [] of fabricated boxes).`;
+- If a question has no associated visual, omit the figures field entirely (do not return [] of fabricated boxes).
+- A visual element shared by multiple questions MUST be emitted for each question that uses it. Do NOT restrict a figure to only one question — if two or more questions refer to the same diagram, include the same (or overlapping) bounding box in each question's figures array.`;
 
 export const MCQ_INLINE_MARKED_PROMPT = `You are extracting multiple-choice questions from exam pages where the correct
 answer is visually marked on the page (circled, ticked, underlined, highlighted,
@@ -198,6 +215,9 @@ For EVERY page, emit one entry in page_map with:
 • section_label    — section name if this page belongs to a named section, else null
 • question_range_start — first question number on this page (null if no questions)
 • question_range_end   — last question number on this page (null if no questions)
+• has_images       — true if the page contains any embedded figures, diagrams, charts, graphs,
+                     illustrations, photos, or image-based tables that cannot be fully represented
+                     as plain text; false if the page is purely textual.
 
 ────────────────────────────────────────────
 STEP 3 — MARKING FORMAT CLASSIFICATION

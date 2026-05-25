@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { FieldDefinition, Schema } from "../../schema/types";
-import { MARKING_STYLE_VALUES, MCQ_TYPE_VALUES, OPTION_LETTERS } from "../prompts";
+import { CONTEXT_DEPENDENCY_PROMPT_BLOCK, MARKING_STYLE_VALUES, MCQ_TYPE_VALUES, OPTION_LETTERS } from "../prompts";
 import type { ResponseSchema } from "../../lib/modelClient";
 import {
   CanonicalMcqOptionsSchema,
@@ -109,6 +109,8 @@ export function buildMcqResponseSchema(schema: Schema): ResponseSchema {
     confidence: { type: "number" },
     notes: { type: "string" },
     source_snippet: { type: "string" },
+    depends_on: { type: "string", nullable: true },
+    context_group: { type: "string", nullable: true },
     figures: {
       type: "array",
       items: {
@@ -191,6 +193,8 @@ export function buildMcqZodSchema(schema: Schema): z.ZodTypeAny {
     confidence: z.number().min(0).max(1),
     notes: z.string(),
     source_snippet: z.string(),
+    depends_on: z.string().nullable().optional(),
+    context_group: z.string().nullable().optional(),
     figures: z.array(z.object({
       ymin: z.number().int().min(0).max(1000),
       xmin: z.number().int().min(0).max(1000),
@@ -225,24 +229,28 @@ export const buildInlineMarkedZodSchema = buildMcqZodSchema;
  */
 export function buildCustomFieldsPromptBlock(schema: Schema): string {
   const custom = customExtractFields(schema);
-  if (custom.length === 0) return "";
+  const lines: string[] = [];
 
-  const lines: string[] = [
-    "",
-    "",
-    "In addition to the canonical fields, for each question extract the user-defined fields below.",
-    "Match each field's data type exactly; return null for optional fields when not applicable.",
-    "",
-  ];
-  for (const f of custom) {
-    const typeLabel =
-      f.type === "enum" && f.enum_values && f.enum_values.length > 0
-        ? `enum [${f.enum_values.join(" | ")}]`
-        : f.type;
-    const reqLabel = f.required ? "required" : "optional";
-    lines.push(`  ${f.name} (${typeLabel}, ${reqLabel}):`);
-    lines.push(`    ${f.description || "(no description provided — use field name as guidance)"}`);
-    lines.push("");
+  if (custom.length > 0) {
+    lines.push(
+      "",
+      "",
+      "In addition to the canonical fields, for each question extract the user-defined fields below.",
+      "Match each field's data type exactly; return null for optional fields when not applicable.",
+      "",
+    );
+    for (const f of custom) {
+      const typeLabel =
+        f.type === "enum" && f.enum_values && f.enum_values.length > 0
+          ? `enum [${f.enum_values.join(" | ")}]`
+          : f.type;
+      const reqLabel = f.required ? "required" : "optional";
+      lines.push(`  ${f.name} (${typeLabel}, ${reqLabel}):`);
+      lines.push(`    ${f.description || "(no description provided — use field name as guidance)"}`);
+      lines.push("");
+    }
   }
+
+  lines.push(CONTEXT_DEPENDENCY_PROMPT_BLOCK);
   return lines.join("\n");
 }

@@ -15,6 +15,7 @@ export const PageMapEntrySchema = z.object({
   mcq_count: z.number().int().min(0).default(0),
   true_false_count: z.number().int().min(0).default(0),
   written_count: z.number().int().min(0).default(0),
+  has_images: z.boolean().default(false),
 });
 export type PageMapEntry = z.infer<typeof PageMapEntrySchema>;
 
@@ -127,8 +128,9 @@ const DOCUMENT_ANALYSIS_RESPONSE_SCHEMA: ResponseSchema = {
           mcq_count: { type: "integer" },
           true_false_count: { type: "integer" },
           written_count: { type: "integer" },
+          has_images: { type: "boolean" },
         },
-        required: ["page_number", "content_type", "page_summary", "mcq_count", "true_false_count", "written_count"],
+        required: ["page_number", "content_type", "page_summary", "mcq_count", "true_false_count", "written_count", "has_images"],
       },
     },
     answer_key_locations: {

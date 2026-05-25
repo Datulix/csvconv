@@ -202,7 +202,7 @@ async function runExtractorWithExtraSuffix(
 
   const parts: ContentPart[] = [];
   for (const page of args.pages) {
-    parts.push({ kind: "text", text: `PAGE ${page.pageNumber}:` });
+    parts.push({ kind: "text", text: `PAGE ${page.pageNumber}${page.has_images ? " [this page contains figures/images]" : ""}:` });
     parts.push({
       kind: "image",
       mimeType: page.mimeType ?? "image/jpeg",

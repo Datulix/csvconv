@@ -319,6 +319,15 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
 
     if (signal?.aborted) throw new Error("aborted");
 
+    // Annotate pageImages with has_images from document analysis page map
+    if (docAnalysis) {
+      const pageMapByNumber = new Map(docAnalysis.page_map.map((p) => [p.page_number, p]));
+      for (const img of pageImages) {
+        const entry = pageMapByNumber.get(img.pageNumber);
+        if (entry) img.has_images = entry.has_images;
+      }
+    }
+
     // Derive blank pages from analyzer output (replaces triage blank-page filter)
     const blankPageNumbers = docAnalysis
       ? docAnalysis.page_map
