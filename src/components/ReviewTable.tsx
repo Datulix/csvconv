@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { loadRows, type SqliteRowRecord } from "../lib/sqliteCache";
 import { buildAuditJson, buildCsv, writeTextFile, type AuditExport } from "../lib/export";
@@ -11,7 +12,6 @@ type Filter = "all" | "needs_review" | "ai_needs_review" | "ok";
 interface ReviewTableProps {
   cacheKey: string | null;
 }
-
 export function ReviewTable({ cacheKey }: ReviewTableProps) {
   const [rows, setRows] = useState<SqliteRowRecord[]>([]);
   const [loading, setLoading] = useState(false);
@@ -19,6 +19,14 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
   const [filter, setFilter] = useState<Filter>("all");
   const [savedSchemas, setSavedSchemas] = useState<Schema[]>([]);
   const [selectedSchemaName, setSelectedSchemaName] = useState<string | null>(null);
+  const [activeLightbox, setActiveLightbox] = useState<{ path?: string; explanation: string; kind: string } | null>(null);
+
+  const hasFigures = useMemo(() => {
+    return rows.some((r) => {
+      const row = r.canonical_json as any;
+      return row?.figures && row.figures.length > 0;
+    });
+  }, [rows]);
 
   useEffect(() => {
     (async () => {
@@ -205,6 +213,7 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
               <tr>
                 <th>page</th>
                 <th>row</th>
+                {hasFigures ? <th>figures</th> : null}
                 {columns.map((c) => (
                   <th key={c}>{c}</th>
                 ))}
@@ -227,6 +236,41 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
                   >
                     <td>{r.page_number}</td>
                     <td>{r.row_index_within_page}</td>
+                    {hasFigures ? (
+                      <td>
+                        <div className="figure-cell">
+                          {((row.figures as any[]) ?? []).map((fig: any, fIdx: number) => {
+                            if (fig.crop_error) {
+                              return (
+                                <div
+                                  key={fIdx}
+                                  className="figure-warning-icon"
+                                  title={`Crop error: ${fig.crop_error}`}
+                                >
+                                  ⚠️
+                                </div>
+                              );
+                            }
+                            if (fig.path) {
+                              return (
+                                <div
+                                  key={fIdx}
+                                  className="figure-thumbnail-container"
+                                  onClick={() => setActiveLightbox(fig)}
+                                  title={`${fig.kind}: ${fig.explanation}`}
+                                >
+                                  <img
+                                    src={convertFileSrc(fig.path)}
+                                    alt={fig.explanation}
+                                  />
+                                </div>
+                              );
+                            }
+                            return null;
+                          })}
+                        </div>
+                      </td>
+                    ) : null}
                     {columns.map((c) => (
                       <td key={c}>{formatCell(row[c])}</td>
                     ))}
@@ -245,6 +289,21 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
         </div>
       ) : rows.length > 0 ? (
         <p className="hint">No rows match the current filter.</p>
+      ) : null}
+
+      {activeLightbox ? (
+        <div className="lightbox-overlay" onClick={() => setActiveLightbox(null)}>
+          <div className="lightbox-content" onClick={(e) => e.stopPropagation()}>
+            <button className="lightbox-close" onClick={() => setActiveLightbox(null)}>×</button>
+            {activeLightbox.path ? (
+              <img src={convertFileSrc(activeLightbox.path)} alt={activeLightbox.explanation} />
+            ) : null}
+            <div className="lightbox-meta">
+              <span className="badge kind">{activeLightbox.kind}</span>
+              <p className="lightbox-desc">{activeLightbox.explanation}</p>
+            </div>
+          </div>
+        </div>
       ) : null}
     </div>
   );
@@ -279,7 +338,7 @@ function deriveColumns(rows: SqliteRowRecord[]): string[] {
   }
   for (const k of Object.keys(sampled)) {
     if (seen.has(k)) continue;
-    if (k === "options" || k === "source_snippet" || k === "notes") continue;
+    if (k === "options" || k === "source_snippet" || k === "notes" || k === "figures") continue;
     cols.push(k);
     seen.add(k);
   }

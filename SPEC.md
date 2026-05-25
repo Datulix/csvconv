@@ -98,6 +98,9 @@ csvconv/
 | `triage_pdf(path, run_id, password?)` | TS → Rust | Per-page analysis BEFORE rasterization: returns `Vec<{page_number, is_blank, page_type: "digital"|"scanned"|"mixed", text_density: float, skew_angle_deg: float}>`. Uses Pdfium text-extraction APIs to measure text density per page; flags pages with no rendered content as blank; estimates skew via Hough transform on a thumbnail. |
 | `rasterize_pdf(path, dpi, run_id, password?, deskew_pages?, skip_pages?)` | TS → Rust | Render pages to JPEGs in staging dir `%APPDATA%/csvconv/staging/<run_id>/page-N.jpg`; return file paths. JPEGs re-encoded at quality=82, max long-edge 2048 px. `deskew_pages` is the list of page numbers to apply deskew/contrast to (from triage). `skip_pages` (blank pages) are not rasterized. `password` supplied for encrypted PDFs. |
 | `cleanup_staging(run_id)`     | TS → Rust | Delete the staging directory for a finished run  |
+| `crop_figures_batch(jobs)`    | TS → Rust | Crop multiple bounding box regions from page JPEGs in parallel and save to persistent storage |
+| `figures_dir(cache_key)`      | TS → Rust | Get or create the persistent figures directory path for the given cache key |
+| `cleanup_figures(cache_key)`  | TS → Rust | Delete the figures directory for a purged run |
 | `hash_pdf(path)`              | TS → Rust | sha256 of PDF bytes for cache key                |
 | `keychain_set(api_key)`       | TS → Rust | Store API key in OS keychain                     |
 | `keychain_get()`              | TS → Rust | Retrieve API key                                 |
@@ -180,6 +183,11 @@ PDF in
 └──────────────────────────────────────────────────┘ │
    │                                                  │
    ▼                                                  ▼
+┌──────────────────────────────────────────────────────────────┐
+│ Crop Figures — crop visual regions per question (Rust)       │
+└──────────────────────────────────────────────────────────────┘
+   │
+   ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ Cache (per stage) + Review UI (rows appear incrementally)    │
 └──────────────────────────────────────────────────────────────┘
@@ -324,6 +332,15 @@ State transitions: `running → paused → running` (resume), `running → cance
 4. Auto-split decisions are recorded in audit for cost transparency.
 
 **Request payload pre-check.** Before sending, `modelClient.ts` measures the serialized payload size (text + base64-encoded images). If approaching the model's request size cap (configurable per model, default ~20 MB), `batching.ts` sends fewer images per batch for that call and emits a warning. JPEGs are already re-encoded at q=82 / max 2048px long edge by the rasterizer; further reduction is an explicit downgrade and is logged.
+
+### 4.10 Figure & table cropping
+
+To handle visual elements (diagrams, charts, graphs, illustrations, and complex tables) that cannot be faithfully represented as flat text:
+
+- **Detection**: The extractor schema includes an optional `figures` array on every row containing bounding box coordinates (`ymin`, `xmin`, `ymax`, `xmax` on a 0–1000 scale), a concise explanation, and a kind label (`figure`, `diagram`, `chart`, `table`, `illustration`). The model detects these visual regions relative to the page coordinates.
+- **Cropping**: A dedicated `crop_figures` phase is executed after validator + merge, before the rows are persisted. Coordinates are translated into actual pixels with a `1.5%` boundary padding margin and clamped to image dimensions. Degenerate regions (under `0.5%` or over `95%` page area) are automatically filtered out.
+- **Persistence**: Cropped JPEG files are written to `%APPDATA%/csvconv/figures/<cache_key>/<job_id>.jpg` and their absolute paths are mapped onto the row's `figures` field.
+- **Review UI**: Previews render figure thumbnails at `44x44px` min using Tauri's `convertFileSrc` (enabled via whitelisting scopes in `tauri.conf.json`). Clicking a thumbnail opens a centered lightbox showing the full cropped image and visual metadata. Failed crops degrade gracefully showing a warning indicator.
 
 ## 5. Schema system
 

@@ -2,7 +2,7 @@ import { z } from "zod";
 import { callModel, type ContentPart, type ResponseSchema } from "../../lib/modelClient";
 import type { ModelId } from "../../lib/models";
 import type { Schema } from "../../schema/types";
-import { STRICT_JSON_REMINDER } from "../prompts";
+import { FIGURES_PROMPT_BLOCK, STRICT_JSON_REMINDER } from "../prompts";
 import { buildCustomFieldsPromptBlock, customExtractFields } from "./schemaBuilders";
 import type { ExtractedBatch, ExtractorPageInput } from "./types";
 
@@ -30,7 +30,7 @@ export interface RunQaPairExtractorArgs {
 }
 
 function buildQaPairPrompt(schema: Schema): string {
-  return QA_PAIR_PROMPT + buildCustomFieldsPromptBlock(schema) + STRICT_JSON_REMINDER;
+  return QA_PAIR_PROMPT + FIGURES_PROMPT_BLOCK + buildCustomFieldsPromptBlock(schema) + STRICT_JSON_REMINDER;
 }
 
 function buildQaPairResponseSchema(schema: Schema): ResponseSchema {
@@ -51,6 +51,21 @@ function buildQaPairResponseSchema(schema: Schema): ResponseSchema {
     confidence: { type: "number" },
     notes: { type: "string" },
     source_snippet: { type: "string" },
+    figures: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          ymin: { type: "integer" },
+          xmin: { type: "integer" },
+          ymax: { type: "integer" },
+          xmax: { type: "integer" },
+          explanation: { type: "string" },
+          kind: { type: "string", enum: ["figure", "diagram", "chart", "table", "illustration"] },
+        },
+        required: ["ymin", "xmin", "ymax", "xmax", "explanation", "kind"],
+      },
+    },
     ...customProps,
   };
 
@@ -90,6 +105,14 @@ function buildQaPairZodSchema(schema: Schema): z.ZodTypeAny {
     confidence: z.number().min(0).max(1),
     notes: z.string(),
     source_snippet: z.string(),
+    figures: z.array(z.object({
+      ymin: z.number().int().min(0).max(1000),
+      xmin: z.number().int().min(0).max(1000),
+      ymax: z.number().int().min(0).max(1000),
+      xmax: z.number().int().min(0).max(1000),
+      explanation: z.string(),
+      kind: z.enum(["figure", "diagram", "chart", "table", "illustration"]),
+    })).optional(),
   };
   for (const f of custom) {
     let base: z.ZodTypeAny;

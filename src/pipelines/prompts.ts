@@ -1,8 +1,11 @@
-/**
- * Extractor prompts library. Each prompt block matches the corresponding §6.x section
- * in SPEC.md. Per-content-type and per-format text is kept as exported constants so the
- * `promptBuilder` can compose them with the user's schema's per-field block.
- */
+export const FIGURES_PROMPT_BLOCK = `
+
+Figures, diagrams & complex tables:
+- For each question, identify every visual element that is part of the question or required to answer it: figures, diagrams, charts, graphs, illustrations, and tables that lose meaning when flattened to text.
+- For each, emit one entry in the figures array with: normalized bounding box on a 0–1000 scale relative to the page image (ymin, xmin, ymax, xmax); a concise explanation of what it shows; and a kind label.
+- Be generous with bounds — include axis labels, legends, captions, and a thin margin around the visual. Tight crops that clip labels are a defect.
+- Do not emit a box for plain prose text, equations rendered as text, or single-line tables that fit in a string field. Do not emit a single box covering the entire page.
+- If a question has no associated visual, omit the figures field entirely (do not return [] of fabricated boxes).`;
 
 export const MCQ_INLINE_MARKED_PROMPT = `You are extracting multiple-choice questions from exam pages where the correct
 answer is visually marked on the page (circled, ticked, underlined, highlighted,
@@ -41,7 +44,7 @@ CRITICAL RULES:
 11. For each question, populate source_snippet with the verbatim text you
     transcribed from the question's region of the page (including question
     text and surrounding option text). Cap at 2000 characters; truncate with
-    "..." if longer. This stays in audit only, never in the user CSV.`;
+    "..." if longer. This stays in audit only, never in the user CSV.` + FIGURES_PROMPT_BLOCK;
 
 /** Common closing line reminding the model to return strict JSON. */
 export const STRICT_JSON_REMINDER = `\nReturn strict JSON matching the response schema.`;
@@ -103,7 +106,7 @@ CRITICAL RULES:
     to a short reason.
 11. For each question, also infer mcq_type from the question wording / layout.
 12. Populate source_snippet with the verbatim transcribed text around the
-    question, capped at 2000 characters.`;
+    question, capped at 2000 characters.` + FIGURES_PROMPT_BLOCK;
 
 /**
  * Answer-key-at-end body extractor variant (SPEC §6.3). Body pages produce questions
@@ -132,7 +135,7 @@ CRITICAL RULES:
    to a short reason.
 9. Infer mcq_type from question wording / layout.
 10. Populate source_snippet with the verbatim transcribed text around the
-    question, capped at 2000 characters.`;
+    question, capped at 2000 characters.` + FIGURES_PROMPT_BLOCK;
 
 /**
  * Answer-key parser prompt. Run separately on the trailing pages of an

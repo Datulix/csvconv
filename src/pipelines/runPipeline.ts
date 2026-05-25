@@ -3,6 +3,9 @@ import type { AppSettings } from "../lib/settings";
 import {
   rasterizePdf,
   readImageAsBase64,
+  cropFiguresBatch,
+  figuresDir,
+  type CropJob,
 } from "../lib/pdfApi";
 import { invoke } from "@tauri-apps/api/core";
 import type { RunMode } from "../schema/contentTypes";
@@ -16,7 +19,7 @@ import {
 } from "../lib/sqliteCache";
 import type { ExamFormat } from "./detector";
 import { runDocumentAnalyzer, type DocumentAnalysisResult } from "./documentAnalyzer";
-import type { ExtractedBatch, ExtractedPage, ExtractedRow, ExtractorPageInput } from "./extractors/types";
+import type { ExtractedBatch, ExtractedPage, ExtractedRow, ExtractorPageInput, FigureBounds } from "./extractors/types";
 import { runInlineMarkedExtractor } from "./extractors/mcq_inlineMarked";
 import { runWrittenAnswerExtractor } from "./extractors/mcq_writtenAnswer";
 import {
@@ -140,6 +143,56 @@ function chunkPages<T>(items: T[], size: number): T[][] {
     out.push(items.slice(i, i + size));
   }
   return out;
+}
+
+function partitionBySection<T extends { pageNumber: number } | { page_number: number }>(
+  items: T[],
+  docAnalysis: DocumentAnalysisResult | null,
+  batchSize: number,
+): T[][] {
+  const getPageNum = (item: T): number => {
+    return "pageNumber" in item ? (item as any).pageNumber : (item as any).page_number;
+  };
+
+  if (!docAnalysis || !docAnalysis.page_map || docAnalysis.page_map.length === 0) {
+    return chunkPages(items, batchSize);
+  }
+
+  const batches: T[][] = [];
+  let currentSectionLabel: string | null = null;
+  let currentGroup: T[] = [];
+
+  for (const item of items) {
+    const pageNum = getPageNum(item);
+    const entry = docAnalysis.page_map.find((p) => p.page_number === pageNum);
+    const sectionLabel = (entry?.section_label || "").trim() || null;
+
+    if (sectionLabel === null) {
+      if (currentSectionLabel !== null || currentGroup.length >= batchSize) {
+        if (currentGroup.length > 0) {
+          batches.push(currentGroup);
+          currentGroup = [];
+        }
+      }
+      currentSectionLabel = null;
+      currentGroup.push(item);
+    } else {
+      if (currentSectionLabel !== sectionLabel || currentGroup.length >= batchSize) {
+        if (currentGroup.length > 0) {
+          batches.push(currentGroup);
+          currentGroup = [];
+        }
+      }
+      currentSectionLabel = sectionLabel;
+      currentGroup.push(item);
+    }
+  }
+
+  if (currentGroup.length > 0) {
+    batches.push(currentGroup);
+  }
+
+  return batches;
 }
 
 async function mapWithConcurrency<I, O>(
@@ -289,7 +342,7 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
     }
 
     const batchSize = Math.max(1, settings.pages_per_batch);
-    const batches = chunkPages(bodyImages, batchSize);
+    const batches = partitionBySection(bodyImages, docAnalysis, batchSize);
     reportProgress(onProgress, {
       stage: "extract",
       message: `Extracting ${batches.length} batch${batches.length === 1 ? "" : "es"}…`,
@@ -395,10 +448,13 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
         lowConfRows,
       });
 
-      const variant = (format ?? "inline_marked") as McqExtractorVariant;
+      const variant: McqExtractorVariant =
+        format === "written_answer" ? "written_answer"
+        : format === "answer_key_at_end" ? "answer_key_at_end"
+        : "inline_marked";
       const allPagesMerged: ExtractedPage[] = merged.pages;
       const validatedPages: ExtractedPage[] = [];
-      for (const pageGroup of chunkPages(allPagesMerged, batchSize)) {
+      for (const pageGroup of partitionBySection(allPagesMerged, docAnalysis, batchSize)) {
         const initial: ExtractedBatch = { pages: pageGroup };
         const pageInputs: ExtractorPageInput[] = pageGroup
           .map((p) => pageImageByNumber.get(p.page_number))
@@ -574,6 +630,78 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
     } else {
       skipPhase("solve", "Solve", "ai", `Mode is ${mode} and content type is ${schema.content_type} — solver only runs for MCQ in review/answer mode`);
       skipPhase("compare", "Compare", "system", `Solver did not run`);
+    }
+
+    // 10.5 — Crop figures
+    const figureJobs: CropJob[] = [];
+    const jobToFigure = new Map<string, { row: ExtractedRow; idx: number }>();
+    const figDir = await figuresDir(cacheKey);
+
+    for (const page of merged.pages) {
+      const rasterPage = raster.pages.find((p) => p.page_number === page.page_number);
+      if (!rasterPage?.path) continue;
+      for (const row of page.rows) {
+        const figs = (row as ExtractedRow).figures as FigureBounds[] | undefined;
+        if (!figs?.length) continue;
+        figs.forEach((fb, i) => {
+          const qn = String(row.question_number ?? `p${page.page_number}_r${page.rows.indexOf(row)}`);
+          const safeQn = qn.replace(/[^a-zA-Z0-9_-]/g, "_");
+          const jobId = `p${page.page_number}_q${safeQn}_f${i}`;
+          const destPath = `${figDir}/${jobId}.jpg`;
+          figureJobs.push({
+            jobId,
+            srcPath: rasterPage.path,
+            destPath,
+            ymin: fb.ymin,
+            xmin: fb.xmin,
+            ymax: fb.ymax,
+            xmax: fb.xmax,
+          });
+          jobToFigure.set(jobId, { row, idx: i });
+        });
+      }
+    }
+
+    if (figureJobs.length > 0) {
+      beginPhase("crop_figures", "Crop Figures", "system", {
+        count: figureJobs.length,
+        figuresDir: figDir,
+      });
+      const results = await cropFiguresBatch(figureJobs);
+      let okCount = 0;
+      let failCount = 0;
+      for (const r of results) {
+        const entry = jobToFigure.get(r.jobId);
+        if (!entry) continue;
+        const figs = entry.row.figures as any[];
+        if (figs && figs[entry.idx]) {
+          if (r.ok) {
+            figs[entry.idx].path = figureJobs.find((j) => j.jobId === r.jobId)!.destPath;
+            okCount++;
+          } else {
+            figs[entry.idx].crop_error = r.error ?? "unknown";
+            failCount++;
+            console.warn(`[crop_figures] ${r.jobId}: ${r.error}`);
+          }
+        }
+      }
+      completePhase("crop_figures", {
+        okCount,
+        failCount,
+        results: results.map((r) => {
+          const job = figureJobs.find((j) => j.jobId === r.jobId);
+          return {
+            jobId: r.jobId,
+            ok: r.ok,
+            error: r.error,
+            width: r.width,
+            height: r.height,
+            path: job?.destPath,
+          };
+        }),
+      });
+    } else {
+      skipPhase("crop_figures", "Crop Figures", "system", "No figures detected");
     }
 
     // 11. Persist all rows to cache for the Review UI

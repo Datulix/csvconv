@@ -43,6 +43,20 @@ export const CorrectAnswerSchema = z.preprocess(
   z.enum(OPTION_LETTERS).nullable(),
 );
 
+export interface FigureBounds {
+  ymin: number;
+  xmin: number;
+  ymax: number;
+  xmax: number;
+  explanation: string;
+  kind: "figure" | "diagram" | "chart" | "table" | "illustration";
+}
+
+export interface FigureCrop extends FigureBounds {
+  path?: string;
+  crop_error?: string;
+}
+
 /**
  * Canonical row fields produced by the inline-marked extractor. Custom user fields
  * are attached separately via `extra` — the dynamic zod builder folds them into a
@@ -60,6 +74,7 @@ export interface CanonicalMcqRow {
   confidence: number;
   notes: string;
   source_snippet: string;
+  figures?: FigureCrop[];
 }
 
 /**

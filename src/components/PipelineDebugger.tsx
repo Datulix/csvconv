@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { getTraceHistory, getTraceByRunId, loadAllTracesFromDb, type PhaseEntry, type PipelineTrace, type AiCallEntry } from "../lib/pipelineTrace";
 import { listRuns, type SqliteRunRecord } from "../lib/sqliteCache";
 
@@ -233,6 +234,21 @@ function renderPersistInput(input: unknown) {
   );
 }
 
+function renderCropFiguresInput(input: unknown) {
+  const i = input as { count: number; figuresDir: string };
+  return (
+    <Section label="Figure Cropping configuration">
+      <KVPairs pairs={[
+        ["figures to crop", String(i.count)],
+        ["persistent figures directory", i.figuresDir],
+      ]} />
+      <div className="dbg-note">
+        Translates normalized 0–1000 coordinate boxes into pixel coordinates, applies a 1.5% boundary padding margin, clamps to image size, filters out degenerate regions, and invokes Rust batch cropping.
+      </div>
+    </Section>
+  );
+}
+
 // ── Phase output renderers ─────────────────────────────────────
 
 function renderRasterizeOutput(output: unknown) {
@@ -370,18 +386,28 @@ function renderExtractOutput(output: unknown) {
       <Section label="Extracted rows">
         <table className="dbg-table">
           <thead>
-            <tr><th>Page</th><th>Q#</th><th>Answer</th><th>Confidence</th><th>Flags</th></tr>
+            <tr><th>Page</th><th>Q#</th><th>Answer</th><th>Confidence</th><th>Figures</th><th>Flags</th></tr>
           </thead>
           <tbody>
             {allRows.map((row, i) => {
               const conf = typeof row.confidence === "number" ? row.confidence : null;
               const isWarn = conf !== null && conf < 0.75;
+              const figs = (row as any).figures as any[] | undefined;
               return (
                 <tr key={i} className={isWarn ? "dbg-row-warn" : ""}>
                   <td>{row._page ?? "?"}</td>
                   <td>{String(row.question_number ?? "?")}</td>
                   <td>{String(row.correct_answer ?? "—")}</td>
                   <td>{conf !== null ? <ConfBar value={conf} /> : "—"}</td>
+                  <td>
+                    {figs && figs.length > 0 ? (
+                      <span title={figs.map((f) => `[${f.kind}]: ${f.explanation}`).join("\n")}>
+                        🖼️ {figs.length} ({figs.map((f) => f.kind).join(", ")})
+                      </span>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
                   <td>
                     {row.is_partial && <Badge text="partial" color="blue" />}
                     {" "}
@@ -592,16 +618,44 @@ function renderPersistOutput(output: unknown) {
           <div className="dbg-section-label">Persisted Rows Details</div>
           <table className="dbg-table">
             <thead>
-              <tr><th>Q#</th><th>Answer</th><th>Confidence</th></tr>
+              <tr><th>Q#</th><th>Answer</th><th>Confidence</th><th>Figures</th></tr>
             </thead>
             <tbody>
               {o.rows.map((row: any, i: number) => {
                 const conf = typeof row.confidence === "number" ? row.confidence : null;
+                const figs = row.figures as any[] | undefined;
                 return (
                   <tr key={i}>
                     <td>{String(row.question_number ?? "?")}</td>
                     <td>{String(row.correct_answer ?? "—")}</td>
                     <td>{conf !== null ? <ConfBar value={conf} /> : "—"}</td>
+                    <td>
+                      {figs && figs.length > 0 ? (
+                        <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
+                          {figs.map((fig, fIdx) => (
+                            fig.path ? (
+                              <img
+                                key={fIdx}
+                                src={convertFileSrc(fig.path)}
+                                alt={fig.explanation}
+                                title={`${fig.kind}: ${fig.explanation}`}
+                                style={{
+                                  height: "30px",
+                                  width: "30px",
+                                  objectFit: "cover",
+                                  borderRadius: "2px",
+                                  border: "1px solid var(--border)",
+                                }}
+                              />
+                            ) : (
+                              <span key={fIdx} title={fig.explanation}>🖼️</span>
+                            )
+                          ))}
+                        </div>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
                   </tr>
                 );
               })}
@@ -610,6 +664,73 @@ function renderPersistOutput(output: unknown) {
         </div>
       )}
     </Section>
+  );
+}
+
+function renderCropFiguresOutput(output: unknown) {
+  const o = output as {
+    okCount: number;
+    failCount: number;
+    results?: Array<{
+      jobId: string;
+      ok: boolean;
+      error?: string;
+      width: number;
+      height: number;
+      path?: string;
+    }>;
+  };
+  return (
+    <>
+      <Section label="Summary">
+        <KVPairs pairs={[
+          ["successfully cropped", <Badge text={`${o.okCount} ok`} color="green" />],
+          ["failed crops", o.failCount > 0 ? <Badge text={`${o.failCount} failed`} color="red" /> : "0"],
+        ]} />
+      </Section>
+      {o.results && o.results.length > 0 && (
+        <Section label="Cropped Figures Details">
+          <table className="dbg-table">
+            <thead>
+              <tr>
+                <th>Job ID</th>
+                <th>Status</th>
+                <th>Dimensions / Error</th>
+                <th>Image Preview</th>
+              </tr>
+            </thead>
+            <tbody>
+              {o.results.map((r) => (
+                <tr key={r.jobId} className={r.ok ? "" : "dbg-row-error"}>
+                  <td><code>{r.jobId}</code></td>
+                  <td>{r.ok ? <Badge text="success" color="green" /> : <Badge text="failed" color="red" />}</td>
+                  <td>{r.ok ? `${r.width}x${r.height}px` : r.error ?? "unknown error"}</td>
+                  <td>
+                    {r.ok && r.path ? (
+                      <img
+                        src={convertFileSrc(r.path)}
+                        alt={r.jobId}
+                        style={{
+                          maxHeight: "60px",
+                          maxWidth: "120px",
+                          objectFit: "contain",
+                          border: "1px solid var(--border)",
+                          borderRadius: "4px",
+                          background: "var(--bg-input)",
+                          padding: "2px",
+                        }}
+                      />
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Section>
+      )}
+    </>
   );
 }
 
@@ -714,6 +835,7 @@ function renderInput(phase: PhaseEntry): ReactNode {
     case "extract":     return renderExtractInput(phase.input);
     case "merge":       return renderMergeInput(phase.input);
     case "validate":    return renderValidateInput(phase.input);
+    case "crop_figures":return renderCropFiguresInput(phase.input);
     case "solve":       return renderSolveInput(phase.input);
     case "compare":     return renderCompareInput(phase.input);
     case "answer_key":  return renderAnswerKeyInput(phase.input);
@@ -733,6 +855,7 @@ function renderOutput(phase: PhaseEntry): ReactNode {
     case "extract":     return renderExtractOutput(phase.output);
     case "merge":       return renderMergeOutput(phase.output);
     case "validate":    return renderValidateOutput(phase.output);
+    case "crop_figures":return renderCropFiguresOutput(phase.output);
     case "solve":       return renderSolveOutput(phase.output);
     case "compare":     return renderCompareOutput(phase.output);
     case "answer_key":  return renderAnswerKeyOutput(phase.output);

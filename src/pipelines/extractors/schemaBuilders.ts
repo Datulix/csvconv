@@ -109,6 +109,21 @@ export function buildMcqResponseSchema(schema: Schema): ResponseSchema {
     confidence: { type: "number" },
     notes: { type: "string" },
     source_snippet: { type: "string" },
+    figures: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          ymin: { type: "integer" },
+          xmin: { type: "integer" },
+          ymax: { type: "integer" },
+          xmax: { type: "integer" },
+          explanation: { type: "string" },
+          kind: { type: "string", enum: ["figure", "diagram", "chart", "table", "illustration"] },
+        },
+        required: ["ymin", "xmin", "ymax", "xmax", "explanation", "kind"],
+      },
+    },
     ...customProps,
   };
 
@@ -176,6 +191,15 @@ export function buildMcqZodSchema(schema: Schema): z.ZodTypeAny {
     confidence: z.number().min(0).max(1),
     notes: z.string(),
     source_snippet: z.string(),
+    figures: z.array(z.object({
+      ymin: z.number().int().min(0).max(1000),
+      xmin: z.number().int().min(0).max(1000),
+      ymax: z.number().int().min(0).max(1000),
+      xmax: z.number().int().min(0).max(1000),
+      explanation: z.string(),
+      kind: z.enum(["figure", "diagram", "chart", "table", "illustration"]),
+      path: z.string().optional(),
+    })).optional(),
   };
   for (const f of custom) {
     rowShape[f.name] = fieldToZod(f);

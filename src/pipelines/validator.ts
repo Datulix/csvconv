@@ -262,7 +262,7 @@ function reconcile(
         const confB = typeof rowB.confidence === "number" ? rowB.confidence : 0;
         const winner = confB > confA ? rowB : rowA;
         return {
-          row: { ...winner },
+          row: { ...winner, figures: (winner.figures as any) ?? (rowA.figures as any) },
           needs_review: disagrees,
           candidates: disagrees
             ? [

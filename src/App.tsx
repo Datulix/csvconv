@@ -71,19 +71,17 @@ function App() {
         </div>
       </aside>
       <main className="main-content">
-        {view === "convert" ? (
+        <div
+          className="new-conversion-wrapper"
+          style={{ display: view === "convert" ? "flex" : "none" }}
+        >
           <NewConversion onOpenInReview={openInReview} />
-        ) : view === "schemas" ? (
-          <SchemaEditor />
-        ) : view === "review" ? (
-          <ReviewTable cacheKey={reviewCacheKey} />
-        ) : view === "history" ? (
-          <History onOpenRun={openInReview} />
-        ) : view === "debug" ? (
-          <PipelineDebugger />
-        ) : (
-          <Settings />
-        )}
+        </div>
+        {view === "schemas" && <SchemaEditor />}
+        {view === "review" && <ReviewTable cacheKey={reviewCacheKey} />}
+        {view === "history" && <History onOpenRun={openInReview} />}
+        {view === "debug" && <PipelineDebugger />}
+        {view === "settings" && <Settings />}
       </main>
     </div>
   );

@@ -345,212 +345,232 @@ export function NewConversion({ onOpenInReview }: NewConversionInjectedProps) {
         </section>
       ) : null}
 
-      <section className="card">
-        <label className="block-label">Schema</label>
-        {savedSchemas.length === 0 ? (
-          <p className="hint">
-            No saved schemas yet. Open the <strong>Schemas</strong> tab in the sidebar and create
-            one (or apply a preset).
-          </p>
-        ) : (
-          <select
-            value={selectedSchemaName ?? ""}
-            onChange={(e) => setSelectedSchemaName(e.target.value || null)}
-            disabled={phase.kind !== "idle"}
-          >
-            <option value="">— pick a schema —</option>
-            {savedSchemas.map((s) => (
-              <option key={s.name} value={s.name}>
-                {s.content.name} ({s.content.content_type}, {s.content.fields.length} fields)
-              </option>
-            ))}
-          </select>
-        )}
-        {selectedSchema && contentType !== "mcq" ? (
-          <p className="hint">
-            This schema's content_type is <code>{contentType}</code>. The solver only runs for MCQ
-            schemas — non-MCQ content types go straight to their specialized extractor.
-          </p>
-        ) : null}
-      </section>
+      <div className="new-conversion-grid">
+        <div className="new-conversion-sidebar">
+          {/* Card: Schema */}
+          <section className="card">
+            <label className="block-label">Schema</label>
+            {savedSchemas.length === 0 ? (
+              <p className="hint">
+                No saved schemas yet. Open the <strong>Schemas</strong> tab in the sidebar and create
+                one (or apply a preset).
+              </p>
+            ) : (
+              <select
+                value={selectedSchemaName ?? ""}
+                onChange={(e) => setSelectedSchemaName(e.target.value || null)}
+                disabled={phase.kind !== "idle"}
+              >
+                <option value="">— pick a schema —</option>
+                {savedSchemas.map((s) => (
+                  <option key={s.name} value={s.name}>
+                    {s.content.name} ({s.content.content_type}, {s.content.fields.length} fields)
+                  </option>
+                ))}
+              </select>
+            )}
+            {selectedSchema && contentType !== "mcq" ? (
+              <p className="hint">
+                This schema's content_type is <code>{contentType}</code>. The solver only runs for MCQ
+                schemas — non-MCQ content types go straight to their specialized extractor.
+              </p>
+            ) : null}
+          </section>
 
-      <section className="card">
-        <label className="block-label">PDF</label>
-        {pdfPath ? (
-          <div className="file-row">
-            <span className="file-path" title={pdfPath}>
-              {pdfPath}
-            </span>
-            <button
-              className="btn-secondary small"
-              onClick={handleClearFile}
-              disabled={isWorking}
-            >
-              clear
-            </button>
-          </div>
-        ) : (
-          <button className="btn-secondary" onClick={handlePickFile}>
-            Pick a PDF…
-          </button>
-        )}
-      </section>
-
-      {contentType ? (
-        <section className="card">
-          <label className="block-label">Mode</label>
-          {contentType !== "mcq" ? (
-            <p className="hint">
-              <code>{contentType}</code> content type only supports <strong>Extract</strong> mode.
-              Review and Answer-from-scratch are MCQ-only.
-            </p>
-          ) : (
-            <div className="mode-grid">
-              {MODE_OPTIONS.map((m) => {
-                const disabled = m.mcqOnly && contentType !== "mcq";
-                return (
-                  <label
-                    key={m.id}
-                    className={`mode-card ${mode === m.id ? "selected" : ""} ${
-                      disabled ? "disabled" : ""
-                    }`}
-                  >
-                    <input
-                      type="radio"
-                      name="run-mode"
-                      checked={mode === m.id}
-                      onChange={() => setMode(m.id)}
-                      disabled={disabled || phase.kind !== "idle"}
-                    />
-                    <div className="mode-title">{m.label}</div>
-                    <div className="mode-short">{m.short}</div>
-                    <div className="mode-desc">{m.description}</div>
-                  </label>
-                );
-              })}
-            </div>
-          )}
-        </section>
-      ) : null}
-
-      {costEstimate && costEstimate.byStage.length > 0 ? (
-        <section className="card cost-panel">
-          <div className="cost-header">
-            <label className="block-label">Estimated cost</label>
-            <span className="cost-range">{formatCostRange(costEstimate)}</span>
-          </div>
-          {phase.kind === "analyzed" || phase.kind === "ready_to_extract" ? (
-            <p className="hint">
-              Based on {phase.pageImages.length} pages, 4–12 questions per page (rough range).
-              Real numbers land in the audit JSON after the run.
-            </p>
-          ) : (
-            <p className="hint">
-              Pick a PDF and click <em>Start Analysis</em> to refine this estimate using the actual
-              page count. Currently shows per-page rates only.
-            </p>
-          )}
-          <ul className="cost-breakdown">
-            {costEstimate.byStage.map((s) => (
-              <li key={s.stage}>
-                <span className="cost-stage">{s.stage}</span>
-                <span className="cost-amount">
-                  {s.low === s.high ? formatCurrency(s.low) : `${formatCurrency(s.low)} – ${formatCurrency(s.high)}`}
+          {/* Card: PDF */}
+          <section className="card">
+            <label className="block-label">PDF</label>
+            {pdfPath ? (
+              <div className="file-row">
+                <span className="file-path" title={pdfPath}>
+                  {pdfPath}
                 </span>
-                <span className="cost-model">{s.modelId ?? "—"}</span>
-                <span className="cost-note">{s.notes}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      ) : null}
+                <button
+                  className="btn-secondary small"
+                  onClick={handleClearFile}
+                  disabled={isWorking}
+                >
+                  clear
+                </button>
+              </div>
+            ) : (
+              <button className="btn-secondary" onClick={handlePickFile}>
+                Pick a PDF…
+              </button>
+            )}
+          </section>
 
-      {phase.kind !== "idle" && phase.kind !== "error" ? (
-        <section className="card status-card">
-          {isWorking ? (
-            <>
-              <div className="spinner" />
-              <span>{(phase as Extract<Phase, { message: string }>).message}</span>
-            </>
+          {/* Card: Mode */}
+          {contentType ? (
+            <section className="card">
+              <label className="block-label">Mode</label>
+              {contentType !== "mcq" ? (
+                <p className="hint">
+                  <code>{contentType}</code> content type only supports <strong>Extract</strong> mode.
+                  Review and Answer-from-scratch are MCQ-only.
+                </p>
+              ) : (
+                <div className="mode-grid">
+                  {MODE_OPTIONS.map((m) => {
+                    const disabled = m.mcqOnly && contentType !== "mcq";
+                    return (
+                      <label
+                        key={m.id}
+                        className={`mode-card ${mode === m.id ? "selected" : ""} ${
+                          disabled ? "disabled" : ""
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="run-mode"
+                          checked={mode === m.id}
+                          onChange={() => setMode(m.id)}
+                          disabled={disabled || phase.kind !== "idle"}
+                        />
+                        <div className="mode-title">{m.label}</div>
+                        <div className="mode-short">{m.short}</div>
+                        <div className="mode-desc">{m.description}</div>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
           ) : null}
-          {phase.kind === "analyzed" ? (
-            <AnalysisReadout
-              result={phase.result}
-              onConfirm={handleConfirmFormat}
-              onReset={handleReset}
-            />
-          ) : null}
-          {phase.kind === "ready_to_extract" ? (
-            <ReadyToExtractReadout
-              mode={mode}
-              format={phase.format}
-              analysis={phase.analysis}
-              contentType={contentType}
-              onReset={handleReset}
-              onTestExtract={contentType === "mcq" ? handleTestExtract : null}
-              testExtract={testExtract}
-              fullRun={fullRun}
-              onRunFullPipeline={async () => {
-                if (!pdfPath || !selectedSchema || !settings || phase.kind !== "ready_to_extract") return;
-                setLogs([]);
-                setFullRun({ running: true, progress: null, result: null, error: null });
-                try {
-                  const apiKey = await getApiKey();
-                  if (!apiKey) throw new Error("API key not found — set it in Settings.");
-                  const result = await runPipeline({
-                    apiKey,
-                    pdfPath,
-                    schema: selectedSchema.content,
-                    mode,
-                    format: phase.format,
-                    settings,
-                    runId,
-                    documentAnalysis: phase.analysis,
-                    onProgress: (e) => {
-                      setFullRun((s) => ({ ...s, progress: e }));
-                      setLogs((prev) => [...prev, { ts: Date.now(), stage: e.stage, message: e.message, done: e.done, total: e.total, level: "info" }]);
-                    },
-                  });
-                  setLogs((prev) => [...prev, { ts: Date.now(), stage: "done", message: `Complete — ${result.summary.rowCount} rows, ${result.summary.pageCount} pages.`, level: "info" }]);
-                  setFullRun({ running: false, progress: null, result, error: null });
-                } catch (err) {
-                  const message = err instanceof Error ? err.message : String(err);
-                  setLogs((prev) => [...prev, { ts: Date.now(), stage: "error", message, level: "error" }]);
-                  setFullRun({ running: false, progress: null, result: null, error: message });
-                }
-              }}
-              onOpenInReview={onOpenInReview}
-              onOpenFailedPage={setFailedPageDetail}
-              logs={logs}
-              showLogs={showLogs}
-              onToggleLogs={() => setShowLogs((v) => !v)}
-            />
-          ) : null}
-        </section>
-      ) : null}
 
-      {phase.kind === "error" ? (
-        <section className="card validation-errors">
-          <strong>Something went wrong</strong>
-          <p className="status error">{phase.message}</p>
-          <button className="btn-secondary" onClick={handleReset}>
-            Try again
-          </button>
-        </section>
-      ) : null}
-
-      {phase.kind === "idle" ? (
-        <div className="action-bar">
-          <div className="action-spacer" />
-          <button
-            className="btn-primary big"
-            onClick={handleStart}
-            disabled={preflight.length > 0}
-          >
-            Start Analysis
-          </button>
+          {/* Card: Cost Estimate */}
+          {costEstimate && costEstimate.byStage.length > 0 ? (
+            <section className="card cost-panel">
+              <div className="cost-header">
+                <label className="block-label">Estimated cost</label>
+                <span className="cost-range">{formatCostRange(costEstimate)}</span>
+              </div>
+              {phase.kind === "analyzed" || phase.kind === "ready_to_extract" ? (
+                <p className="hint">
+                  Based on {phase.pageImages.length} pages, 4–12 questions per page (rough range).
+                  Real numbers land in the audit JSON after the run.
+                </p>
+              ) : (
+                <p className="hint">
+                  Pick a PDF and click <em>Start Analysis</em> to refine this estimate using the actual
+                  page count. Currently shows per-page rates only.
+                </p>
+              )}
+              <ul className="cost-breakdown">
+                {costEstimate.byStage.map((s) => (
+                  <li key={s.stage} className="cost-item">
+                    <div className="cost-item-main">
+                      <span className="cost-stage">{s.stage}</span>
+                      <span className="cost-amount">
+                        {s.low === s.high ? formatCurrency(s.low) : `${formatCurrency(s.low)} – ${formatCurrency(s.high)}`}
+                      </span>
+                      <span className="cost-model">{s.modelId ?? "—"}</span>
+                    </div>
+                    {s.notes ? <div className="cost-note">{s.notes}</div> : null}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
         </div>
-      ) : null}
+
+        <div className="new-conversion-main">
+          {/* Status/Readout card */}
+          {phase.kind !== "idle" && phase.kind !== "error" ? (
+            <section className="card status-card">
+              {isWorking ? (
+                <div style={{ display: "flex", gap: "10px", alignItems: "center", width: "100%" }}>
+                  <div className="spinner" />
+                  <span>{(phase as Extract<Phase, { message: string }>).message}</span>
+                </div>
+              ) : null}
+              {phase.kind === "analyzed" ? (
+                <AnalysisReadout
+                  result={phase.result}
+                  onConfirm={handleConfirmFormat}
+                  onReset={handleReset}
+                />
+              ) : null}
+              {phase.kind === "ready_to_extract" ? (
+                <ReadyToExtractReadout
+                  mode={mode}
+                  format={phase.format}
+                  analysis={phase.analysis}
+                  contentType={contentType}
+                  onReset={handleReset}
+                  onTestExtract={contentType === "mcq" ? handleTestExtract : null}
+                  testExtract={testExtract}
+                  fullRun={fullRun}
+                  onRunFullPipeline={async () => {
+                    if (!pdfPath || !selectedSchema || !settings || phase.kind !== "ready_to_extract") return;
+                    setLogs([]);
+                    setFullRun({ running: true, progress: null, result: null, error: null });
+                    try {
+                      const apiKey = await getApiKey();
+                      if (!apiKey) throw new Error("API key not found — set it in Settings.");
+                      const result = await runPipeline({
+                        apiKey,
+                        pdfPath,
+                        schema: selectedSchema.content,
+                        mode,
+                        format: phase.format,
+                        settings,
+                        runId,
+                        documentAnalysis: phase.analysis,
+                        onProgress: (e) => {
+                          setFullRun((s) => ({ ...s, progress: e }));
+                          setLogs((prev) => [...prev, { ts: Date.now(), stage: e.stage, message: e.message, done: e.done, total: e.total, level: "info" }]);
+                        },
+                      });
+                      setLogs((prev) => [...prev, { ts: Date.now(), stage: "done", message: `Complete — ${result.summary.rowCount} rows, ${result.summary.pageCount} pages.`, level: "info" }]);
+                      setFullRun({ running: false, progress: null, result, error: null });
+                    } catch (err) {
+                      const message = err instanceof Error ? err.message : String(err);
+                      setLogs((prev) => [...prev, { ts: Date.now(), stage: "error", message, level: "error" }]);
+                      setFullRun({ running: false, progress: null, result: null, error: message });
+                    }
+                  }}
+                  onOpenInReview={onOpenInReview}
+                  onOpenFailedPage={setFailedPageDetail}
+                  logs={logs}
+                  showLogs={showLogs}
+                  onToggleLogs={() => setShowLogs((v) => !v)}
+                />
+              ) : null}
+            </section>
+          ) : null}
+
+          {/* Validation errors card */}
+          {phase.kind === "error" ? (
+            <section className="card validation-errors">
+              <strong>Something went wrong</strong>
+              <p className="status error">{phase.message}</p>
+              <button className="btn-secondary" onClick={handleReset}>
+                Try again
+              </button>
+            </section>
+          ) : null}
+
+          {/* Start Analysis CTA when idle */}
+          {phase.kind === "idle" ? (
+            <div className="card start-analysis-card">
+              <h3>Start Document Analysis</h3>
+              <p>
+                Once you select a schema and a PDF document, click the button below to start the analysis phase.
+                The AI will scan the layout, detect the structure, and identify the question format.
+              </p>
+              <button
+                className="btn-primary big"
+                onClick={handleStart}
+                disabled={preflight.length > 0}
+              >
+                Start Analysis
+              </button>
+            </div>
+          ) : null}
+        </div>
+      </div>
+
 
       {failedPageDetail ? (
         <FailedPageModal

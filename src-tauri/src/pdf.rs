@@ -163,3 +163,169 @@ pub fn cleanup_staging(staging_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CropJob {
+    pub job_id: String,        // caller-supplied; echoed back in result
+    pub src_path: String,      // page JPEG in run staging dir
+    pub dest_path: String,     // absolute path in figures/<cache_key>/
+    pub ymin: u32, pub xmin: u32, pub ymax: u32, pub xmax: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CropResult {
+    pub job_id: String,
+    pub ok: bool,
+    pub error: Option<String>,
+    pub width: u32, pub height: u32,
+}
+
+const FIGURE_PADDING_PCT: f32 = 0.015;       // 1.5% padding on each edge
+const MIN_AREA_FRAC: f32 = 0.005;            // reject < 0.5% page area
+const MAX_AREA_FRAC: f32 = 0.95;             // reject > 95% page area
+const FIGURE_JPEG_QUALITY: u8 = 90;          // higher quality than page raster
+
+pub fn crop_figures_batch(jobs: &[CropJob]) -> Vec<CropResult> {
+    use std::collections::HashMap;
+    let mut cache: HashMap<String, DynamicImage> = HashMap::new();
+    let mut out = Vec::with_capacity(jobs.len());
+
+    for job in jobs {
+        let result = (|| -> Result<(u32,u32)> {
+            let img = if let Some(i) = cache.get(&job.src_path) { i.clone() } else {
+                let i = image::open(&job.src_path)
+                    .with_context(|| format!("open {}", job.src_path))?;
+                cache.insert(job.src_path.clone(), i.clone());
+                i
+            };
+            let (w, h) = (img.width() as f32, img.height() as f32);
+
+            // Normalized 0..1000 -> pixels, with padding, clamped
+            let pad_x = FIGURE_PADDING_PCT * 1000.0;
+            let pad_y = FIGURE_PADDING_PCT * 1000.0;
+            let xmin_n = (job.xmin as f32 - pad_x).max(0.0);
+            let ymin_n = (job.ymin as f32 - pad_y).max(0.0);
+            let xmax_n = (job.xmax as f32 + pad_x).min(1000.0);
+            let ymax_n = (job.ymax as f32 + pad_y).min(1000.0);
+
+            let x = (xmin_n / 1000.0 * w).round() as u32;
+            let y = (ymin_n / 1000.0 * h).round() as u32;
+            let cw = (((xmax_n - xmin_n) / 1000.0) * w).round() as u32;
+            let ch = (((ymax_n - ymin_n) / 1000.0) * h).round() as u32;
+
+            let area_frac = (cw as f32 * ch as f32) / (w * h);
+            if area_frac < MIN_AREA_FRAC { anyhow::bail!("box too small ({:.3}%)", area_frac*100.0); }
+            if area_frac > MAX_AREA_FRAC { anyhow::bail!("box covers full page ({:.1}%)", area_frac*100.0); }
+
+            let cw = cw.max(1).min(img.width().saturating_sub(x).max(1));
+            let ch = ch.max(1).min(img.height().saturating_sub(y).max(1));
+
+            let cropped = img.crop_imm(x, y, cw, ch);
+            if let Some(parent) = Path::new(&job.dest_path).parent() {
+                fs::create_dir_all(parent).ok();
+            }
+            save_jpeg(&cropped, &PathBuf::from(&job.dest_path), FIGURE_JPEG_QUALITY)?;
+            Ok((cw, ch))
+        })();
+
+        out.push(match result {
+            Ok((w,h)) => CropResult { job_id: job.job_id.clone(), ok: true, error: None, width: w, height: h },
+            Err(e)    => CropResult { job_id: job.job_id.clone(), ok: false, error: Some(format!("{e:#}")), width: 0, height: 0 },
+        });
+    }
+    out
+}
+
+pub fn figures_dir_for(app_data: &Path, cache_key: &str) -> PathBuf {
+    app_data.join("figures").join(cache_key)
+}
+
+pub fn cleanup_figures(app_data: &Path, cache_key: &str) -> Result<()> {
+    let dir = figures_dir_for(app_data, cache_key);
+    if dir.exists() { fs::remove_dir_all(dir)?; }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_crop_figures_batch() {
+        use image::{ImageBuffer, Rgb};
+
+        // Create a synthetic image (1000x1000 pixels)
+        let img = ImageBuffer::from_fn(1000, 1000, |x, y| {
+            if x % 2 == 0 && y % 2 == 0 {
+                Rgb([0, 0, 0])
+            } else {
+                Rgb([255, 255, 255])
+            }
+        });
+        let dynamic_img = DynamicImage::ImageRgb8(img);
+
+        let temp_dir = std::env::temp_dir().join("csvconv_test");
+        fs::create_dir_all(&temp_dir).unwrap();
+        let src_path = temp_dir.join("src.jpg");
+        save_jpeg(&dynamic_img, &src_path, 82).unwrap();
+
+        // 1. Valid job (bounds on 0..1000 scale)
+        let dest_path_valid = temp_dir.join("dest_valid.jpg");
+        let job_valid = CropJob {
+            job_id: "valid".to_string(),
+            src_path: src_path.to_string_lossy().to_string(),
+            dest_path: dest_path_valid.to_string_lossy().to_string(),
+            ymin: 100,
+            xmin: 100,
+            ymax: 500,
+            xmax: 500,
+        };
+
+        // 2. Too small job (area < 0.5%)
+        let dest_path_small = temp_dir.join("dest_small.jpg");
+        let job_small = CropJob {
+            job_id: "small".to_string(),
+            src_path: src_path.to_string_lossy().to_string(),
+            dest_path: dest_path_small.to_string_lossy().to_string(),
+            ymin: 100,
+            xmin: 100,
+            ymax: 102,
+            xmax: 102,
+        };
+
+        // 3. Too large job (area > 95%)
+        let dest_path_large = temp_dir.join("dest_large.jpg");
+        let job_large = CropJob {
+            job_id: "large".to_string(),
+            src_path: src_path.to_string_lossy().to_string(),
+            dest_path: dest_path_large.to_string_lossy().to_string(),
+            ymin: 0,
+            xmin: 0,
+            ymax: 1000,
+            xmax: 1000,
+        };
+
+        let results = crop_figures_batch(&[job_valid, job_small, job_large]);
+        assert_eq!(results.len(), 3);
+
+        // Assert valid job succeeded
+        assert!(results[0].ok);
+        assert!(dest_path_valid.exists());
+        // Padding should make the crop larger than raw box width/height
+        // Raw box: (500 - 100) / 1000 * 1000 = 400px. With 1.5% padding on each edge, it is (xmin - 15) and (xmax + 15), so 430px.
+        assert_eq!(results[0].width, 430);
+        assert_eq!(results[0].height, 430);
+
+        // Assert small job failed
+        assert!(!results[1].ok);
+        assert!(results[1].error.as_ref().unwrap().contains("too small"));
+
+        // Assert large job failed
+        assert!(!results[2].ok);
+        assert!(results[2].error.as_ref().unwrap().contains("full page"));
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+}
+

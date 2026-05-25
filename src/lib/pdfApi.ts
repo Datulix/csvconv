@@ -74,3 +74,33 @@ export async function readImageAsBase64(path: string): Promise<string> {
 export async function cleanupStaging(runId: string): Promise<void> {
   await invoke("cleanup_staging", { runId });
 }
+
+export interface CropJob {
+  jobId: string;
+  srcPath: string;
+  destPath: string;
+  ymin: number;
+  xmin: number;
+  ymax: number;
+  xmax: number;
+}
+
+export interface CropResult {
+  jobId: string;
+  ok: boolean;
+  error?: string | null;
+  width: number;
+  height: number;
+}
+
+export async function cropFiguresBatch(jobs: CropJob[]): Promise<CropResult[]> {
+  return invoke<CropResult[]>("crop_figures_batch", { jobs });
+}
+
+export async function figuresDir(cacheKey: string): Promise<string> {
+  return invoke<string>("figures_dir", { cacheKey });
+}
+
+export async function cleanupFigures(cacheKey: string): Promise<void> {
+  await invoke("cleanup_figures", { cacheKey });
+}

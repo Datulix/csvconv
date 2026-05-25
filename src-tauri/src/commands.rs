@@ -279,9 +279,13 @@ pub fn cache_purge_run(
     state: State<'_, CacheState>,
     cache_key: String,
 ) -> Result<(), String> {
-    with_cache(&app, &state, |c| {
+    let res = with_cache(&app, &state, |c| {
         c.purge_run(&cache_key).map_err(|e| format!("{e:#}"))
-    })
+    });
+    if let Ok(app_data) = app_data_dir(&app) {
+        let _ = pdf::cleanup_figures(&app_data, &cache_key);
+    }
+    res
 }
 
 #[tauri::command]
@@ -358,4 +362,25 @@ pub fn cache_load_all_traces(
     state: State<'_, CacheState>,
 ) -> Result<Vec<String>, String> {
     with_cache(&app, &state, |c| c.load_all_traces().map_err(|e| format!("{e:#}")))
+}
+
+#[tauri::command]
+pub async fn crop_figures_batch(
+    jobs: Vec<pdf::CropJob>,
+) -> Result<Vec<pdf::CropResult>, String> {
+    tauri::async_runtime::spawn_blocking(move || Ok(pdf::crop_figures_batch(&jobs)))
+        .await
+        .map_err(|e| format!("thread error: {e}"))?
+}
+
+#[tauri::command]
+pub fn figures_dir(app: AppHandle, cache_key: String) -> Result<String, String> {
+    let dir = pdf::figures_dir_for(&app_data_dir(&app)?, &cache_key);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir figures: {e}"))?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub fn cleanup_figures(app: AppHandle, cache_key: String) -> Result<(), String> {
+    pdf::cleanup_figures(&app_data_dir(&app)?, &cache_key).map_err(|e| format!("{e:#}"))
 }

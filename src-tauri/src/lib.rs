@@ -22,6 +22,9 @@ pub fn run() {
             commands::hash_pdf,
             commands::write_text_file,
             commands::cleanup_old_staging,
+            commands::crop_figures_batch,
+            commands::figures_dir,
+            commands::cleanup_figures,
             commands::keychain_set_api_key,
             commands::keychain_get_api_key,
             commands::keychain_delete_api_key,
@@ -44,6 +47,9 @@ pub fn run() {
             commands::cache_list_runs,
             commands::cache_save_trace,
             commands::cache_load_all_traces,
+            commands::crop_figures_batch,
+            commands::figures_dir,
+            commands::cleanup_figures,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

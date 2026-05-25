@@ -41,11 +41,18 @@ export function History({ onOpenRun }: HistoryProps) {
   return (
     <div className="history-view">
       <header className="history-header">
-        <h1>History</h1>
+        <div className="history-header-title">
+          <h1>History</h1>
+          <span className="history-header-subtitle">
+            Manage past conversion runs, cache states, and pipeline outputs
+          </span>
+        </div>
         <div className="history-actions">
-          <button className="btn-secondary small" onClick={refresh}>refresh</button>
-          <button className="btn-danger small" onClick={handleClearAll}>
-            clear all cache
+          <button className="btn-secondary" onClick={refresh}>
+            <span style={{ marginRight: 6 }}>↻</span> Refresh
+          </button>
+          <button className="btn-danger" onClick={handleClearAll}>
+            <span style={{ marginRight: 6 }}>🗑</span> Clear all cache
           </button>
         </div>
       </header>
@@ -80,7 +87,7 @@ export function History({ onOpenRun }: HistoryProps) {
                 </div>
               </button>
               <button
-                className="btn-icon"
+                className="history-purge-btn"
                 title="Purge this run"
                 onClick={() => handlePurgeRun(r.cache_key)}
               >

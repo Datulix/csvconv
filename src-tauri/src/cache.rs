@@ -283,15 +283,15 @@ impl Cache {
                confirmed_format, state, started_at, finished_at, token_usage, cost)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(cache_key) DO UPDATE SET
-               pdf_sha256=excluded.pdf_sha256,
-               schema_hash=excluded.schema_hash,
-               mode=excluded.mode,
-               content_type=excluded.content_type,
-               confirmed_format=excluded.confirmed_format,
-               state=excluded.state,
-               finished_at=excluded.finished_at,
-               token_usage=excluded.token_usage,
-               cost=excluded.cost",
+               pdf_sha256=COALESCE(excluded.pdf_sha256, runs.pdf_sha256),
+               schema_hash=COALESCE(excluded.schema_hash, runs.schema_hash),
+               mode=COALESCE(excluded.mode, runs.mode),
+               content_type=COALESCE(excluded.content_type, runs.content_type),
+               confirmed_format=COALESCE(excluded.confirmed_format, runs.confirmed_format),
+               state=COALESCE(excluded.state, runs.state),
+               finished_at=COALESCE(excluded.finished_at, runs.finished_at),
+               token_usage=COALESCE(excluded.token_usage, runs.token_usage),
+               cost=COALESCE(excluded.cost, runs.cost)",
             params![
                 record.cache_key,
                 record.pdf_sha256,

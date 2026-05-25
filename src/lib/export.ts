@@ -86,10 +86,20 @@ function csvEscape(value: unknown): string {
 }
 
 export function buildCsv(schema: Schema, rows: ExtractedRow[]): string {
-  const header = schema.fields.map((f) => csvEscape(f.name)).join(",");
-  const lines = [header];
+  const hasFigures = rows.some((row) => (row.figures as any)?.length > 0);
+  const headers = schema.fields.map((f) => csvEscape(f.name));
+  if (hasFigures) {
+    headers.push("figure_paths");
+  }
+  const headerLine = headers.join(",");
+  const lines = [headerLine];
   for (const row of rows) {
     const values = schema.fields.map((f) => csvEscape(resolveFieldValue(f, row)));
+    if (hasFigures) {
+      const figures = (row.figures as Array<{ path?: string }>) ?? [];
+      const paths = figures.map((f) => f.path).filter(Boolean).join(";");
+      values.push(csvEscape(paths));
+    }
     lines.push(values.join(","));
   }
   return lines.join("\r\n") + "\r\n";
