@@ -3,7 +3,6 @@ import type { AppSettings } from "../lib/settings";
 import {
   rasterizePdf,
   readImageAsBase64,
-  triagePdf,
 } from "../lib/pdfApi";
 import { invoke } from "@tauri-apps/api/core";
 import type { RunMode } from "../schema/contentTypes";
@@ -68,6 +67,11 @@ export interface RunPipelineArgs {
   runId: string;
   onProgress?: ProgressFn;
   signal?: AbortSignal;
+  /**
+   * Pre-computed document analysis from the NewConversion flow. If provided, the pipeline
+   * skips its own analyzer call and uses this result directly, avoiding a duplicate LLM call.
+   */
+  documentAnalysis?: DocumentAnalysisResult;
 }
 
 export interface PipelineResult {
@@ -96,7 +100,7 @@ function reportProgress(fn: ProgressFn | undefined, e: PipelineProgress) {
   if (fn) fn(e);
 }
 
-function modelForStage(stage: keyof Pick<AppSettings, "detector_model" | "analyzer_model" | "extractor_model" | "validator_model" | "solver_model">, settings: AppSettings): ModelId {
+function modelForStage(stage: keyof Pick<AppSettings, "analyzer_model" | "extractor_model" | "validator_model" | "solver_model">, settings: AppSettings): ModelId {
   const value = (settings[stage] ?? settings.primary_model) as ModelId | null;
   if (!value) throw new Error(`No model configured for stage "${stage}" (set a primary model in Settings)`);
   return value;
@@ -115,7 +119,6 @@ async function computeCacheKey(args: {
     args.mode,
     args.format ?? "none",
     args.settings.primary_model ?? "none",
-    args.settings.detector_model ?? "inherit",
     args.settings.analyzer_model ?? "inherit",
     args.settings.extractor_model ?? "inherit",
     args.settings.validator_model ?? "inherit",
@@ -198,57 +201,30 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
   });
 
   try {
-    // 1. Triage
-    reportProgress(onProgress, { stage: "triage", message: "Triaging PDF…" });
-    beginPhase("triage", "Triage", "system", { pdfPath, runId, dpi: settings.dpi });
-    const triage = await triagePdf(pdfPath, runId);
-    completePhase("triage", {
-      pdfType: triage.pdf_type,
-      pageCount: triage.pages.length,
-      blankCount: triage.pages.filter((p) => p.is_blank).length,
-      pages: triage.pages,
-    });
-
-    // 2. Rasterize all non-blank pages (or all pages if no blanks detected)
-    const blankPages = triage.pages.filter((p) => p.is_blank).map((p) => p.page_number);
-    const allPages = triage.pages.map((p) => p.page_number);
-    const targetPages = allPages.filter((p) => !blankPages.includes(p));
+    // 1. Rasterize all pages (no triage pre-filter; analyzer identifies blank pages)
     reportProgress(onProgress, {
       stage: "rasterize",
-      message: `Rasterizing ${targetPages.length} of ${allPages.length} pages…`,
-      total: targetPages.length,
+      message: "Rasterizing PDF pages…",
     });
 
-    const deskewPairs: Array<[number, number]> = triage.pages
-      .filter((p) => Math.abs(p.skew_angle_deg) >= 1.0 && p.page_type === "scanned")
-      .map((p) => [p.page_number, p.skew_angle_deg]);
-    const deskewPages = deskewPairs.map(([n]) => n);
-
     beginPhase("rasterize", "Rasterize", "system", {
-      targetPages,
-      blankPages,
-      deskewPages,
       dpi: settings.dpi,
     });
     const raster = await rasterizePdf({
       path: pdfPath,
       dpi: settings.dpi,
       runId,
-      deskewPages,
-      skewAngles: deskewPairs,
-      skipPages: blankPages,
     });
     completePhase("rasterize", {
       pages: raster.pages.map((p) => ({
         pageNumber: p.page_number,
         width: p.width,
         height: p.height,
-        deskewed: p.deskewed,
         skipped: p.skipped,
       })),
     });
 
-    // 3. Base64-encode page images
+    // 2. Base64-encode page images
     reportProgress(onProgress, { stage: "encode", message: "Encoding page images…" });
     const pageImages: ExtractorPageInput[] = [];
     for (const p of raster.pages) {
@@ -260,43 +236,56 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
 
     if (signal?.aborted) throw new Error("aborted");
 
-    // 4. Document Intelligence — full structural analysis of all pages
+    // 3. Document Intelligence — full structural analysis of all pages.
+    // If a pre-computed analysis was passed in (from NewConversion), skip the LLM call.
     reportProgress(onProgress, { stage: "analyze", message: "Analyzing document structure…" });
     const analyzerModel = modelForStage("analyzer_model", settings);
     beginPhase("analyze", "Document Analysis", "ai", {
       pageCount: pageImages.length,
       modelId: analyzerModel,
+      precomputed: !!args.documentAnalysis,
     });
-    let docAnalysis: DocumentAnalysisResult | null = null;
-    try {
-      docAnalysis = await runDocumentAnalyzer({
-        apiKey,
-        modelId: analyzerModel,
-        pages: pageImages,
-        pdfName,
-        signal,
-      });
-      completePhase("analyze", docAnalysis);
-    } catch (err) {
-      completePhase("analyze", { error: String(err) });
-      throw err;
+    let docAnalysis: DocumentAnalysisResult | null = args.documentAnalysis ?? null;
+    if (!docAnalysis) {
+      try {
+        docAnalysis = await runDocumentAnalyzer({
+          apiKey,
+          modelId: analyzerModel,
+          pages: pageImages,
+          pdfName,
+          signal,
+        });
+        completePhase("analyze", docAnalysis);
+      } catch (err) {
+        completePhase("analyze", { error: String(err) });
+        throw err;
+      }
+    } else {
+      completePhase("analyze", { ...docAnalysis, note: "Pre-computed from conversion flow" });
     }
 
     if (signal?.aborted) throw new Error("aborted");
 
-    // 5. Plan extractor batches.
-    // For answer_key_at_end, skip the answer-key pages from the body extractor.
-    // Use exact page locations from document analysis when available; fall back to heuristic.
+    // Derive blank pages from analyzer output (replaces triage blank-page filter)
+    const blankPageNumbers = docAnalysis
+      ? docAnalysis.page_map
+          .filter((p) => p.content_type === "blank")
+          .map((p) => p.page_number)
+      : [];
+
+    // 4. Plan extractor batches.
+    // For answer_key_at_end, exclude answer-key pages from the body extractor.
+    // Use exact page locations from document analysis; fall back to heuristic if unavailable.
     const isAnswerKey = format === "answer_key_at_end" && mode !== "answer";
     let answerKeyPageNumbers: number[] = [];
-    let bodyImages = pageImages;
+    let bodyImages = pageImages.filter((p) => !blankPageNumbers.includes(p.pageNumber));
     if (isAnswerKey) {
       if (docAnalysis && docAnalysis.answer_key_locations.length > 0) {
         answerKeyPageNumbers = docAnalysis.answer_key_locations.map((l) => l.page_number);
       } else {
-        answerKeyPageNumbers = pickAnswerKeyPages(allPages.length);
+        answerKeyPageNumbers = pickAnswerKeyPages(pageImages.length);
       }
-      bodyImages = pageImages.filter((p) => !answerKeyPageNumbers.includes(p.pageNumber));
+      bodyImages = bodyImages.filter((p) => !answerKeyPageNumbers.includes(p.pageNumber));
     }
 
     const batchSize = Math.max(1, settings.pages_per_batch);
@@ -309,14 +298,6 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
     });
 
     const extractorModel = modelForStage("extractor_model", settings);
-
-    beginPhase("detect", "Format Detection", "ai", {
-      contentType: schema.content_type,
-      mode,
-      confirmedFormat: format,
-      note: "Format is confirmed before runPipeline starts (see Convert page detector step).",
-    });
-    completePhase("detect", { confirmedFormat: format ?? "n/a (non-MCQ or answer mode)" });
 
     beginPhase("extract", "Extract", "ai", {
       batches: batches.map((b, i) => ({ batchIndex: i, pageNumbers: b.map((p) => p.pageNumber) })),
@@ -394,8 +375,7 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
     let merged = mergeAcrossPages(batchResults, { mergeSourceSnippets: true });
     completePhase("merge", { mergedCount: prePartials.length, pages: merged.pages });
 
-    // 7. Validator (only for MCQ; skip for non-MCQ content types since their extractors
-    //    don't share the same row shape today).
+    // 7. Validator (only for MCQ)
     let needsReviewCount = 0;
     if (schema.content_type === "mcq" && settings.validator_enabled) {
       reportProgress(onProgress, { stage: "validator", message: "Re-checking low-confidence rows…" });
@@ -415,7 +395,6 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
         lowConfRows,
       });
 
-      // Run validator per-batch (matching the extractor batching).
       const variant = (format ?? "inline_marked") as McqExtractorVariant;
       const allPagesMerged: ExtractedPage[] = merged.pages;
       const validatedPages: ExtractedPage[] = [];
@@ -503,12 +482,10 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
       const solverModel = modelForStage("solver_model", settings);
       beginPhase("solve", "Solve", "ai", { modelId: solverModel, mode });
 
-      // Build solver questions, attaching the relevant page image(s).
       const allRows: ExtractedRow[] = [];
       const solverQuestions: SolverQuestion[] = [];
       for (const page of merged.pages) {
         for (const row of page.rows) {
-          // Ensure question_number is a string for the solver and downstream join.
           if (row.question_number == null) {
             row.question_number = `p${page.page_number}_r${page.rows.indexOf(row)}`;
           }
@@ -518,7 +495,6 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
           const images: SolverPageImage[] = [
             { pageNumber: stemImg.pageNumber, base64: stemImg.base64, mimeType: "image/jpeg" },
           ];
-          // is_partial → include continuation page too
           if (row.is_partial) {
             const cont = pageImageByNumber.get(page.page_number + 1);
             if (cont) {
@@ -566,7 +542,6 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
         completePhase("compare", { summary: compareSummary, rows: comparedRows });
       } else {
         skipPhase("compare", "Compare", "system", `Mode is ${mode} — Compare only runs in review mode`);
-        // Answer mode: attach ai_answer + ai_explanation + ai_confidence directly onto the row.
         comparedRows = allRows.map((row) => {
           const solved = solverMap.get(String(row.question_number ?? ""));
           if (solved) {
@@ -604,7 +579,7 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
     // 11. Persist all rows to cache for the Review UI
     reportProgress(onProgress, { stage: "persist", message: "Saving rows to cache…" });
     let totalRows = 0;
-    const finalPages = merged.pages.map((page, _pi) => {
+    const finalPages = merged.pages.map((page) => {
       const enrichedRows = page.rows.map((row) => {
         if (comparedRows) {
           const qn = String(row.question_number ?? "");
@@ -663,7 +638,6 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
       message: `Done — ${totalRows} row${totalRows === 1 ? "" : "s"} produced.`,
     });
 
-    // Enrich failed-page records with their JPEG so the UI can render thumbnails.
     const enrichedFailedPages: SplitFailure[] = allFailedPages.map((f) => {
       const img = pageImageByNumber.get(f.pageNumber);
       return {
@@ -680,7 +654,7 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
       rows: allRowsOut,
       pages: finalPages,
       summary: {
-        pageCount: triage.pages.length,
+        pageCount: raster.pages.length,
         rowCount: totalRows,
         needsReviewCount,
         aiNeedsReviewCount,
@@ -719,7 +693,7 @@ async function runExtractorVariant(args: {
   }
   // MCQ
   if (mode === "answer") {
-    return runAnswerKeyBodyExtractor(args); // questions-only, ignore marked answers
+    return runAnswerKeyBodyExtractor(args);
   }
   switch (format) {
     case "inline_marked":

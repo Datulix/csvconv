@@ -50,32 +50,13 @@ function KVPairs({ pairs }: { pairs: [string, ReactNode][] }) {
 
 // ── Phase input renderers ─────────────────────────────────────
 
-function renderTriageInput(input: unknown) {
-  const i = input as { pdfPath: string; runId: string; dpi: number };
-  return (
-    <Section label="Rust command: triage_pdf">
-      <KVPairs pairs={[
-        ["pdf_path", i.pdfPath],
-        ["run_id", i.runId],
-        ["dpi_hint", String(i.dpi)],
-      ]} />
-      <div className="dbg-note">
-        Checks each page: extracts text (text_density), runs pixel histogram (is_blank),
-        classifies digital vs scanned, estimates skew angle via Hough transform.
-      </div>
-    </Section>
-  );
-}
-
 function renderRasterizeInput(input: unknown) {
-  const i = input as { targetPages: number[]; blankPages: number[]; deskewPages: number[]; dpi: number };
+  const i = input as { dpi: number };
   return (
     <Section label="Rust command: rasterize_pdf">
       <KVPairs pairs={[
         ["dpi", String(i.dpi)],
-        ["pages to render", i.targetPages.join(", ") || "—"],
-        ["blank pages skipped", i.blankPages.length > 0 ? i.blankPages.join(", ") : "none"],
-        ["pages deskewed", i.deskewPages.length > 0 ? i.deskewPages.join(", ") : "none"],
+        ["pages", "all (blank pages identified by Document Analysis)"],
         ["jpeg quality", "82"],
         ["max long edge", "2048 px"],
       ]} />
@@ -83,18 +64,19 @@ function renderRasterizeInput(input: unknown) {
   );
 }
 
-function renderDetectInput(input: unknown) {
-  const i = input as { contentType: string; mode: string; confirmedFormat: string | null };
+function renderAnalyzeInput(input: unknown) {
+  const i = input as { pageCount: number; modelId: string; precomputed?: boolean };
   return (
-    <Section label="Format detection">
+    <Section label="Document Analysis">
       <KVPairs pairs={[
-        ["content type", i.contentType],
-        ["mode", i.mode],
-        ["format passed in", i.confirmedFormat ?? "null"],
+        ["model", i.modelId],
+        ["pages analyzed", String(i.pageCount)],
+        ["source", i.precomputed ? "pre-computed (from Convert flow — no extra LLM call)" : "live LLM call"],
       ]} />
       <div className="dbg-note">
-        Format detection runs in the Convert page before the pipeline starts. The confirmed
-        format is passed into runPipeline as a parameter.
+        Sends every rasterized page to the AI in one call. Returns a complete structural map:
+        document summary, per-page breakdown, marking format, question counts, answer-key
+        locations, sections, cross-page questions. Drives all downstream stages.
       </div>
     </Section>
   );
@@ -253,44 +235,6 @@ function renderPersistInput(input: unknown) {
 
 // ── Phase output renderers ─────────────────────────────────────
 
-function renderTriageOutput(output: unknown) {
-  const o = output as {
-    pdfType: string;
-    pageCount: number;
-    blankCount: number;
-    pages: Array<{ page_number: number; is_blank: boolean; page_type: string; text_density: number; skew_angle_deg: number }>;
-  };
-  return (
-    <>
-      <Section label="Summary">
-        <KVPairs pairs={[
-          ["PDF type", o.pdfType],
-          ["Total pages", String(o.pageCount)],
-          ["Blank pages", o.blankCount > 0 ? <Badge text={String(o.blankCount)} color="yellow" /> : "0"],
-        ]} />
-      </Section>
-      <Section label="Per-page metadata">
-        <table className="dbg-table">
-          <thead>
-            <tr><th>Page</th><th>Type</th><th>Blank</th><th>Text density</th><th>Skew</th></tr>
-          </thead>
-          <tbody>
-            {o.pages.map((p) => (
-              <tr key={p.page_number} className={p.is_blank ? "dbg-row-dim" : ""}>
-                <td>{p.page_number}</td>
-                <td>{p.page_type}</td>
-                <td>{p.is_blank ? <Badge text="BLANK" color="yellow" /> : "—"}</td>
-                <td>{p.text_density}</td>
-                <td>{p.skew_angle_deg.toFixed(1)}°</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </Section>
-    </>
-  );
-}
-
 function renderRasterizeOutput(output: unknown) {
   const o = output as {
     pages: Array<{ pageNumber: number; width: number; height: number; deskewed: boolean; skipped: boolean }>;
@@ -317,12 +261,66 @@ function renderRasterizeOutput(output: unknown) {
   );
 }
 
-function renderDetectOutput(output: unknown) {
-  const o = output as { confirmedFormat: string };
+function renderAnalyzeOutput(output: unknown) {
+  const o = output as {
+    document_summary?: string;
+    marking_format?: string;
+    marking_format_confidence?: number;
+    marking_format_notes?: string;
+    total_questions?: number | null;
+    total_mcq_count?: number | null;
+    has_answer_key?: boolean;
+    page_map?: Array<{
+      page_number: number;
+      content_type: string;
+      page_summary: string;
+      mcq_count: number;
+      true_false_count: number;
+      written_count: number;
+    }>;
+    note?: string;
+  };
+  if (o.note) return <Section label="Result"><div className="dbg-note">{o.note}</div></Section>;
+  const conf = typeof o.marking_format_confidence === "number" ? o.marking_format_confidence : null;
   return (
-    <Section label="Confirmed format">
-      <Badge text={o.confirmedFormat} color="purple" />
-    </Section>
+    <>
+      {o.document_summary && (
+        <Section label="Document summary">
+          <div style={{ fontSize: 13, lineHeight: 1.5 }}>{o.document_summary}</div>
+        </Section>
+      )}
+      <Section label="Format detection">
+        <KVPairs pairs={[
+          ["Marking format", o.marking_format ? <Badge text={o.marking_format} color="purple" /> : "—"],
+          ["Confidence", conf !== null ? <ConfBar value={conf} /> : "—"],
+          ["Notes", o.marking_format_notes ?? "—"],
+          ["Total questions", String(o.total_questions ?? "?")],
+          ["MCQ count", String(o.total_mcq_count ?? "?")],
+          ["Answer key present", o.has_answer_key === true ? <Badge text="yes" color="green" /> : o.has_answer_key === false ? "no" : "—"],
+        ]} />
+      </Section>
+      {o.page_map && o.page_map.length > 0 && (
+        <Section label={`Per-page breakdown (${o.page_map.length} pages)`}>
+          <table className="dbg-table">
+            <thead>
+              <tr><th>Page</th><th>Type</th><th>Summary</th><th>MCQ</th><th>T/F</th><th>Written</th></tr>
+            </thead>
+            <tbody>
+              {o.page_map.map((p) => (
+                <tr key={p.page_number} className={p.content_type === "blank" ? "dbg-row-dim" : ""}>
+                  <td>{p.page_number}</td>
+                  <td><code style={{ fontSize: 11 }}>{p.content_type}</code></td>
+                  <td style={{ maxWidth: 260, fontSize: 11, color: "var(--fg-muted)" }}>{p.page_summary}</td>
+                  <td style={{ textAlign: "center" }}>{p.mcq_count || ""}</td>
+                  <td style={{ textAlign: "center" }}>{p.true_false_count || ""}</td>
+                  <td style={{ textAlign: "center" }}>{p.written_count || ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Section>
+      )}
+    </>
   );
 }
 
@@ -711,9 +709,8 @@ function ErrorState({ error }: { error: string }) {
 function renderInput(phase: PhaseEntry): ReactNode {
   if (phase.status === "skipped") return <SkippedState reason={phase.skipReason ?? "—"} />;
   switch (phase.id) {
-    case "triage":      return renderTriageInput(phase.input);
     case "rasterize":   return renderRasterizeInput(phase.input);
-    case "detect":      return renderDetectInput(phase.input);
+    case "analyze":     return renderAnalyzeInput(phase.input);
     case "extract":     return renderExtractInput(phase.input);
     case "merge":       return renderMergeInput(phase.input);
     case "validate":    return renderValidateInput(phase.input);
@@ -731,9 +728,8 @@ function renderOutput(phase: PhaseEntry): ReactNode {
   if (phase.status === "running") return <div className="dbg-note">Running…</div>;
   if (phase.output === undefined) return <div className="dbg-note">No output captured.</div>;
   switch (phase.id) {
-    case "triage":      return renderTriageOutput(phase.output);
     case "rasterize":   return renderRasterizeOutput(phase.output);
-    case "detect":      return renderDetectOutput(phase.output);
+    case "analyze":     return renderAnalyzeOutput(phase.output);
     case "extract":     return renderExtractOutput(phase.output);
     case "merge":       return renderMergeOutput(phase.output);
     case "validate":    return renderValidateOutput(phase.output);

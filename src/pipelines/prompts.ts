@@ -163,32 +163,86 @@ Critical:
 - Preserve question_number as a string. "1" and "01" are different identifiers
   unless the document is clearly zero-padded — in which case strip leading zeros.`;
 
-export const DOCUMENT_ANALYSIS_PROMPT = `You are a document-structure analyst. You receive every page of an exam PDF as images.
-Your job is to produce a complete structural map of the document.
+export const DOCUMENT_ANALYSIS_PROMPT = `You are the brain of an MCQ exam extraction pipeline. You receive EVERY page of an exam PDF as images. Produce a complete structural report — your output drives every downstream stage, so accuracy matters more than speed.
 
-For EVERY page, classify it and record:
-- page_number: the page number as labeled (e.g., PAGE 1, PAGE 2)
-- content_type: one of "questions" | "answer_key" | "instructions" | "blank" | "mixed"
-- section_label: the section name if this page belongs to a named section (e.g. "Section A"),
-  or null if there are no named sections or this page has none
-- question_range_start: the number of the first question on this page (null if no questions)
-- question_range_end: the number of the last question on this page (null if no questions)
+────────────────────────────────────────────
+STEP 1 — WHOLE-DOCUMENT SUMMARY (document_summary)
+────────────────────────────────────────────
+Write 2–6 sentences of plain prose describing the document as a whole. Cover:
+• What kind of document is this (exam, practice paper, answer booklet, …)?
+• Approximate total number of MCQ questions.
+• Are there named sections? If so, how many and what do they cover?
+• Is a separate answer key present? On which pages roughly?
+• Subject / topic if readable.
+• Anything structurally unusual (mixed question types, handwritten answers, multi-column layout, figures, etc.).
 
-Also report at the document level:
-- total_questions: total number of questions in the entire document (null if you cannot determine)
-- sections: named sections with their question ranges (empty array if no sections exist)
-- answer_key_locations: EVERY page that contains an answer key. For multi-section exams where each
-  section has its own key, list each as a separate entry with its section_label and question range.
-- cross_page_questions: questions whose stem starts on one page and concludes on the next page
-- content_patterns: contiguous groups of questions that share the same format type
-  (e.g., Q1-10 are mcq, Q11-12 are true_false)
-- exam_metadata: title, date, subject — set to null for any you cannot read
-- layout: columns (1, 2, or 3), has_math (boolean), primary_language (ISO 639-1 code e.g. "en")
-- notes: any unusual observations (e.g., "answer key is handwritten", "two columns of questions")
+────────────────────────────────────────────
+STEP 2 — PER-PAGE BREAKDOWN (page_map)
+────────────────────────────────────────────
+For EVERY page, emit one entry in page_map with:
 
-IMPORTANT RULES:
+• page_number   — integer matching the "PAGE N:" label in the input
+• content_type  — ONE of: "questions" | "answer_key" | "instructions" | "blank" | "mixed"
+• page_summary  — ONE human-readable sentence describing what is on this page. Be specific. Examples:
+    "Five MCQs (Q11–15) in two columns, no figures."
+    "Answer key for Q1–40, single column."
+    "Cover page — exam title and instructions, no questions."
+    "Blank page."
+    "Three MCQs (Q8–10) plus one true/false question."
+• mcq_count        — count of standard multiple-choice questions on this page (integer ≥ 0)
+• true_false_count — count of true/false questions on this page (integer ≥ 0)
+• written_count    — count of short-answer / written-response questions on this page (integer ≥ 0)
+• section_label    — section name if this page belongs to a named section, else null
+• question_range_start — first question number on this page (null if no questions)
+• question_range_end   — last question number on this page (null if no questions)
+
+────────────────────────────────────────────
+STEP 3 — MARKING FORMAT CLASSIFICATION
+────────────────────────────────────────────
+Classify HOW correct answers are indicated in this document. Choose EXACTLY ONE:
+
+• inline_marked    — options A/B/C/D shown on the same page as the question; one option is visually
+                     marked (circled, ticked, underlined, highlighted, crossed, or boxed).
+• written_answer   — a letter or word is printed or handwritten near each question stem
+                     (e.g., in a margin) to indicate the correct answer.
+• answer_key_at_end — questions appear in the body; a separate answer key
+                     (e.g., "1. A  2. C  3. B") appears on later pages.
+• bubble_sheet     — a separate OMR sheet with filled bubbles.
+• no_answers       — no answer marks are visible anywhere in the document.
+• mixed_or_unclear — multiple formats are present, or the document is too ambiguous to classify.
+
+Also provide:
+• marking_format_confidence — your confidence as a number 0.0–1.0
+• marking_format_notes      — brief explanation of your reasoning, or any ambiguities
+
+Be conservative: prefer mixed_or_unclear if you are not sure.
+
+────────────────────────────────────────────
+STEP 4 — DOCUMENT-LEVEL ROLLUPS
+────────────────────────────────────────────
+Provide these top-level fields:
+
+• total_questions        — total question count across the entire document (null if uncertain)
+• total_mcq_count        — total MCQ questions (null if uncertain)
+• total_true_false_count — total true/false questions (null if uncertain)
+• total_written_count    — total written/short-answer questions (null if uncertain)
+• has_answer_key         — true if any answer key pages are present, false otherwise
+• sections               — named sections [{label, question_range_start, question_range_end}], empty array if none
+• answer_key_locations   — EVERY page containing an answer key [{page_number, section_label, question_range_start, question_range_end}].
+                           For multi-section exams where each section has its own key, list each as a separate entry.
+• cross_page_questions   — questions whose stem starts on one page and ends on the next [{question_number, starts_on_page, ends_on_page}]
+• content_patterns       — contiguous groups of questions sharing the same type [{question_range_start, question_range_end, question_type}]
+                           question_type is one of: "mcq" | "true_false" | "written" | "fill_blank" | "other"
+• exam_metadata          — {title, date, subject} — set each to null if you cannot read it
+• layout                 — {columns: 1|2|3, has_math: boolean, primary_language: ISO 639-1 code}
+• notes                  — any unusual observations not captured above
+
+────────────────────────────────────────────
+CRITICAL RULES
+────────────────────────────────────────────
+- Emit EXACTLY one page_map entry per page — do not skip any page.
 - Preserve question numbers exactly as printed (e.g., "1", "23a", "Q5").
-- If multiple answer keys exist for different sections, each gets its own entry in
-  answer_key_locations with a non-null section_label.
-- Be precise about question ranges — count carefully rather than estimating.
-- Return strict JSON.`;
+- Count mcq_count, true_false_count, written_count carefully — do not estimate.
+- If multiple answer keys exist for different sections, each gets its own entry in answer_key_locations with a non-null section_label.
+- Return strict JSON matching the response schema.`;
+
