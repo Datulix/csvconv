@@ -18,8 +18,8 @@ import {
   needsManualConfirmation,
   type ExamFormat,
 } from "../pipelines/detector";
-import { runDocumentAnalyzer, type DocumentAnalysisResult } from "../pipelines/documentAnalyzer";
-import { CONTENT_TYPES, type RunMode } from "../schema/contentTypes";
+import { runDocumentAnalyzer, type DocumentAnalysisResult, type MarkingRegion } from "../pipelines/documentAnalyzer";
+import { type RunMode } from "../schema/contentTypes";
 import {
   estimateCost,
   formatCostRange,
@@ -29,7 +29,8 @@ import {
 import { runInlineMarkedExtractor } from "../pipelines/extractors/mcq_inlineMarked";
 import type { ExtractedBatch } from "../pipelines/extractors/types";
 import type { ExtractorPageInput } from "../pipelines/extractors/types";
-import { runPipeline, type PipelineProgress, type PipelineResult } from "../pipelines/runPipeline";
+import { runPipeline, runConversion, runAnswerFill, type PipelineProgress, type PipelineResult } from "../pipelines/runPipeline";
+import { conversionInventory, foreignTypeLabel } from "../pipelines/conversionInventory";
 import type { SplitFailure } from "../pipelines/autoSplit";
 import { FailedPageModal } from "./FailedPageModal";
 import { startTrace, beginPhase, completePhase } from "../lib/pipelineTrace";
@@ -47,43 +48,8 @@ type Phase =
   | { kind: "idle" }
   | { kind: "analyzing"; message: string }
   | { kind: "analyzed"; result: DocumentAnalysisResult; pageImages: ExtractorPageInput[] }
-  | { kind: "ready_to_extract"; format: ExamFormat; analysis: DocumentAnalysisResult; pageImages: ExtractorPageInput[] }
+  | { kind: "ready_to_extract"; format: ExamFormat; markingRegions: MarkingRegion[]; analysis: DocumentAnalysisResult; pageImages: ExtractorPageInput[] }
   | { kind: "error"; message: string };
-
-interface ModeOption {
-  id: RunMode;
-  label: string;
-  short: string;
-  description: string;
-  mcqOnly: boolean;
-}
-
-const MODE_OPTIONS: ModeOption[] = [
-  {
-    id: "extract",
-    label: "Extract",
-    short: "Just extract the marked answers from the PDF.",
-    description:
-      "Reads the PDF, identifies questions and marked answers as printed. Cheapest and fastest. Use this for clean answer keys you trust.",
-    mcqOnly: false,
-  },
-  {
-    id: "review",
-    label: "Review",
-    short: "Extract marked answers + have the AI independently solve, then compare.",
-    description:
-      "Extracts the printed answers AND has the AI answer every question from scratch. The Review UI highlights disagreements between the printed key and the AI's answer.",
-    mcqOnly: true,
-  },
-  {
-    id: "answer",
-    label: "Answer from scratch",
-    short: "Ignore any printed answers. AI solves every question.",
-    description:
-      "Skips format confirmation. Useful for unmarked practice exams: extracts the questions and options, then has the AI provide answers with explanations.",
-    mcqOnly: true,
-  },
-];
 
 function newRunId(): string {
   const c = globalThis.crypto as Crypto & { randomUUID?: () => string };
@@ -91,11 +57,15 @@ function newRunId(): string {
   return `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export function NewConversion({ onOpenInReview }: NewConversionInjectedProps) {
+export function NewConversion({ onOpenInReview, active }: NewConversionInjectedProps) {
   const [savedSchemas, setSavedSchemas] = useState<SavedSchemaEntry[]>([]);
   const [selectedSchemaName, setSelectedSchemaName] = useState<string | null>(null);
   const [pdfPath, setPdfPath] = useState<string | null>(null);
-  const [mode, setMode] = useState<RunMode>("extract");
+  // Layered run controls. Extraction always runs. Review adds an independent AI solve
+  // for confidence + disagreement flagging (default on). AI-authoritative makes the AI's
+  // answer the final one (override).
+  const [reviewEnabled, setReviewEnabled] = useState(true);
+  const [aiAuthoritative, setAiAuthoritative] = useState(false);
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   const [apiKeyPresent, setApiKeyPresent] = useState<boolean>(false);
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -115,6 +85,18 @@ export function NewConversion({ onOpenInReview }: NewConversionInjectedProps) {
   const [failedPageDetail, setFailedPageDetail] = useState<SplitFailure | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [showLogs, setShowLogs] = useState(false);
+  // Post-generation conversion of foreign question types (matching → MCQ for now).
+  const [optionCount, setOptionCount] = useState(4);
+  const [conversion, setConversion] = useState<{
+    status: "idle" | "running" | "done" | "error";
+    message?: string;
+    addedCount?: number;
+  }>({ status: "idle" });
+  const [answerFill, setAnswerFill] = useState<{
+    status: "idle" | "running" | "done" | "error";
+    message?: string;
+    filledCount?: number;
+  }>({ status: "idle" });
 
   useEffect(() => {
     (async () => {
@@ -129,19 +111,24 @@ export function NewConversion({ onOpenInReview }: NewConversionInjectedProps) {
     })();
   }, []);
 
+  // This tab stays mounted across switches, so its mount-only load goes stale when the
+  // user adds a schema elsewhere. Re-fetch saved schemas each time the tab becomes active.
+  useEffect(() => {
+    if (!active) return;
+    loadSchemas()
+      .then(setSavedSchemas)
+      .catch((err) => console.error("refreshing schemas failed", err));
+  }, [active]);
+
   const selectedSchema = useMemo(
     () => savedSchemas.find((s) => s.name === selectedSchemaName) ?? null,
     [savedSchemas, selectedSchemaName],
   );
 
   const contentType = selectedSchema?.content.content_type ?? null;
-  const ctInfo = contentType ? CONTENT_TYPES[contentType] : null;
 
-  useEffect(() => {
-    if (ctInfo && !ctInfo.supportedModes.includes(mode)) {
-      setMode("extract");
-    }
-  }, [ctInfo, mode]);
+  // Derive the pipeline's RunMode from the two layered toggles.
+  const mode: RunMode = aiAuthoritative ? "answer" : reviewEnabled ? "review" : "extract";
 
   const effectiveAnalyzerModel: ModelId | null = useMemo(() => {
     if (!settings) return null;
@@ -259,9 +246,18 @@ export function NewConversion({ onOpenInReview }: NewConversionInjectedProps) {
 
       // For Answer mode, skip format confirmation and go straight to ready_to_extract
       // using the analyzer's detected format (or a sensible default).
-      if (mode === "answer" || contentType !== "mcq") {
+      const regions = analysis.marking_regions ?? [];
+      const isMultiRegion = regions.length > 1;
+      const mustConfirm = needsManualConfirmation(
+        analysis.marking_format,
+        analysis.marking_format_confidence,
+      );
+      // Skip the format-confirmation gate whenever there's nothing to decide: answer mode,
+      // non-MCQ, or a confident single-region detection. Only stop to ask when the detector
+      // is genuinely unsure (low confidence) or the document mixes marking methods.
+      if (mode === "answer" || contentType !== "mcq" || (!mustConfirm && !isMultiRegion)) {
         const format = analysis.marking_format === "mixed_or_unclear" ? "inline_marked" : analysis.marking_format;
-        setPhase({ kind: "ready_to_extract", format, analysis, pageImages });
+        setPhase({ kind: "ready_to_extract", format, markingRegions: regions, analysis, pageImages });
         return;
       }
 
@@ -281,9 +277,9 @@ export function NewConversion({ onOpenInReview }: NewConversionInjectedProps) {
   ]);
 
   const handleConfirmFormat = useCallback(
-    (format: ExamFormat) => {
+    (format: ExamFormat, markingRegions: MarkingRegion[]) => {
       if (phase.kind !== "analyzed") return;
-      setPhase({ kind: "ready_to_extract", format, analysis: phase.result, pageImages: phase.pageImages });
+      setPhase({ kind: "ready_to_extract", format, markingRegions, analysis: phase.result, pageImages: phase.pageImages });
     },
     [phase],
   );
@@ -294,7 +290,7 @@ export function NewConversion({ onOpenInReview }: NewConversionInjectedProps) {
   }, []);
 
   const handleTestExtract = useCallback(async () => {
-    if (!pdfPath || !selectedSchema || !settings || selectedSchema.content.content_type !== "mcq") {
+    if (!pdfPath || !selectedSchema || !settings) {
       return;
     }
     setTestExtract({ loading: true, data: null, error: null, pageNumber: 1 });
@@ -364,17 +360,11 @@ export function NewConversion({ onOpenInReview }: NewConversionInjectedProps) {
                 <option value="">— pick a schema —</option>
                 {savedSchemas.map((s) => (
                   <option key={s.name} value={s.name}>
-                    {s.content.name} ({s.content.content_type}, {s.content.fields.length} fields)
+                    {s.content.name} ({s.content.fields.length} fields)
                   </option>
                 ))}
               </select>
             )}
-            {selectedSchema && contentType !== "mcq" ? (
-              <p className="hint">
-                This schema's content_type is <code>{contentType}</code>. The solver only runs for MCQ
-                schemas — non-MCQ content types go straight to their specialized extractor.
-              </p>
-            ) : null}
           </section>
 
           {/* Card: PDF */}
@@ -400,41 +390,43 @@ export function NewConversion({ onOpenInReview }: NewConversionInjectedProps) {
             )}
           </section>
 
-          {/* Card: Mode */}
+          {/* Card: Run options */}
           {contentType ? (
             <section className="card">
-              <label className="block-label">Mode</label>
-              {contentType !== "mcq" ? (
-                <p className="hint">
-                  <code>{contentType}</code> content type only supports <strong>Extract</strong> mode.
-                  Review and Answer-from-scratch are MCQ-only.
-                </p>
-              ) : (
-                <div className="mode-grid">
-                  {MODE_OPTIONS.map((m) => {
-                    const disabled = m.mcqOnly && contentType !== "mcq";
-                    return (
-                      <label
-                        key={m.id}
-                        className={`mode-card ${mode === m.id ? "selected" : ""} ${
-                          disabled ? "disabled" : ""
-                        }`}
-                      >
-                        <input
-                          type="radio"
-                          name="run-mode"
-                          checked={mode === m.id}
-                          onChange={() => setMode(m.id)}
-                          disabled={disabled || phase.kind !== "idle"}
-                        />
-                        <div className="mode-title">{m.label}</div>
-                        <div className="mode-short">{m.short}</div>
-                        <div className="mode-desc">{m.description}</div>
-                      </label>
-                    );
-                  })}
+              <label className="block-label">Run options</label>
+              <p className="hint">
+                Extraction always runs — questions and any printed answers are read from the PDF.
+              </p>
+              <label className={`toggle-row ${phase.kind !== "idle" ? "disabled" : ""}`}>
+                <input
+                  type="checkbox"
+                  checked={reviewEnabled || aiAuthoritative}
+                  disabled={aiAuthoritative || phase.kind !== "idle"}
+                  onChange={(e) => setReviewEnabled(e.target.checked)}
+                />
+                <div className="toggle-text">
+                  <div className="toggle-title">AI review for confidence</div>
+                  <div className="toggle-desc">
+                    The AI independently solves each question and compares to the printed answer,
+                    scoring confidence and flagging disagreements. Doubles solver cost.
+                  </div>
                 </div>
-              )}
+              </label>
+              <label className={`toggle-row ${phase.kind !== "idle" ? "disabled" : ""}`}>
+                <input
+                  type="checkbox"
+                  checked={aiAuthoritative}
+                  disabled={phase.kind !== "idle"}
+                  onChange={(e) => setAiAuthoritative(e.target.checked)}
+                />
+                <div className="toggle-text">
+                  <div className="toggle-title">AI answers (override printed answers)</div>
+                  <div className="toggle-desc">
+                    The AI's answer becomes the final answer for every question, overriding any mark
+                    on the page. Use for unmarked practice exams or to regenerate an answer key.
+                  </div>
+                </div>
+              </label>
             </section>
           ) : null}
 
@@ -498,12 +490,14 @@ export function NewConversion({ onOpenInReview }: NewConversionInjectedProps) {
                   analysis={phase.analysis}
                   contentType={contentType}
                   onReset={handleReset}
-                  onTestExtract={contentType === "mcq" ? handleTestExtract : null}
+                  onTestExtract={handleTestExtract}
                   testExtract={testExtract}
                   fullRun={fullRun}
                   onRunFullPipeline={async () => {
                     if (!pdfPath || !selectedSchema || !settings || phase.kind !== "ready_to_extract") return;
                     setLogs([]);
+                    setConversion({ status: "idle" });
+                    setAnswerFill({ status: "idle" });
                     setFullRun({ running: true, progress: null, result: null, error: null });
                     try {
                       const apiKey = await getApiKey();
@@ -514,6 +508,7 @@ export function NewConversion({ onOpenInReview }: NewConversionInjectedProps) {
                         schema: selectedSchema.content,
                         mode,
                         format: phase.format,
+                        markingRegions: phase.markingRegions,
                         settings,
                         runId,
                         documentAnalysis: phase.analysis,
@@ -539,6 +534,204 @@ export function NewConversion({ onOpenInReview }: NewConversionInjectedProps) {
               ) : null}
             </section>
           ) : null}
+
+          {/* Post-generation conversion card — only for MCQ-focused schemas. */}
+          {phase.kind === "ready_to_extract" && fullRun.result && !fullRun.running && contentType === "mcq"
+            ? (() => {
+                const inventory = conversionInventory(phase.analysis);
+                const summary = inventory
+                  .map((e) => `${e.count} ${foreignTypeLabel(e.questionType)}`)
+                  .join(", ");
+                const analysis = phase.analysis;
+                const pageImages = phase.pageImages;
+                return (
+                  <section className="card conversion-card">
+                    <label className="block-label">Normalize to MCQ</label>
+                    <p className="hint">
+                      Convert any matching, written, or true/false questions into MCQs shaped to your
+                      schema. Runs over every question page and skips questions that are already MCQ.
+                      {summary ? <> Analyzer estimate: <strong>{summary}</strong>.</> : null}
+                    </p>
+
+                    {conversion.status === "done" ? (
+                      <p className="status saved">
+                        {conversion.addedCount && conversion.addedCount > 0
+                          ? `Added ${conversion.addedCount} converted MCQ row${conversion.addedCount === 1 ? "" : "s"}. Open in Review to see them.`
+                          : conversion.message === "skipped"
+                          ? "Skipped — no conversion run."
+                          : "Nothing to convert — every question was already in MCQ form."}
+                      </p>
+                    ) : (
+                      <>
+                        <p className="hint conversion-omit">
+                          Matching keeps real distractors; written/true-false generate distractors
+                          (flagged for review). True/false stays two-option.
+                        </p>
+                        <div className="conversion-controls">
+                          <label className="conversion-optcount">
+                            Options per question
+                            <input
+                              type="number"
+                              min={2}
+                              max={5}
+                              value={optionCount}
+                              disabled={conversion.status === "running"}
+                              onChange={(ev) =>
+                                setOptionCount(Math.max(2, Math.min(5, Number(ev.target.value) || 4)))
+                              }
+                            />
+                          </label>
+                          <div className="conversion-actions">
+                            <button
+                              className="btn-primary"
+                              disabled={conversion.status === "running"}
+                              onClick={async () => {
+                                const result = fullRun.result;
+                                if (!result || !selectedSchema || !settings) return;
+                                setConversion({ status: "running" });
+                                try {
+                                  const apiKey = await getApiKey();
+                                  if (!apiKey) throw new Error("API key not found — set it in Settings.");
+                                  const res = await runConversion({
+                                    apiKey,
+                                    schema: selectedSchema.content,
+                                    settings,
+                                    cacheKey: result.cacheKey,
+                                    pageImages,
+                                    analysis,
+                                    existingPages: result.pages,
+                                    optionCount,
+                                    onProgress: (ev) =>
+                                      setLogs((prev) => [
+                                        ...prev,
+                                        { ts: Date.now(), stage: ev.stage, message: ev.message, level: "info" },
+                                      ]),
+                                  });
+                                  setFullRun((s) =>
+                                    s.result
+                                      ? {
+                                          ...s,
+                                          result: {
+                                            ...s.result,
+                                            summary: {
+                                              ...s.result.summary,
+                                              rowCount: s.result.summary.rowCount + res.addedCount,
+                                              needsReviewCount:
+                                                s.result.summary.needsReviewCount + res.addedCount,
+                                            },
+                                          },
+                                        }
+                                      : s,
+                                  );
+                                  setConversion({ status: "done", addedCount: res.addedCount });
+                                } catch (err) {
+                                  const message = err instanceof Error ? err.message : String(err);
+                                  setLogs((prev) => [...prev, { ts: Date.now(), stage: "convert", message, level: "error" }]);
+                                  setConversion({ status: "error", message });
+                                }
+                              }}
+                            >
+                              {conversion.status === "running" ? "Converting…" : "Convert all → MCQ"}
+                            </button>
+                            <button
+                              className="btn-secondary"
+                              disabled={conversion.status === "running"}
+                              onClick={() => setConversion({ status: "done", addedCount: 0, message: "skipped" })}
+                            >
+                              Skip
+                            </button>
+                          </div>
+                        </div>
+
+                        {conversion.status === "error" ? (
+                          <p className="status error">{conversion.message}</p>
+                        ) : null}
+                      </>
+                    )}
+                  </section>
+                );
+              })()
+            : null}
+
+          {/* Post-generation answer-fill card */}
+          {phase.kind === "ready_to_extract" && fullRun.result && !fullRun.running
+            ? (() => {
+                const pageImages = phase.pageImages;
+                return (
+                  <section className="card conversion-card">
+                    <label className="block-label">Fill answers with AI</label>
+                    <p className="hint">
+                      Have the AI answer any questions that came out without an answer (e.g. this
+                      unmarked exam) and fill the empty answer fields. Existing answers are kept;
+                      filled rows are flagged for review.
+                    </p>
+                    {answerFill.status === "done" ? (
+                      <p className="status saved">
+                        {answerFill.filledCount && answerFill.filledCount > 0
+                          ? `Filled answers for ${answerFill.filledCount} question${answerFill.filledCount === 1 ? "" : "s"}. Open in Review to see them.`
+                          : "Nothing to fill — every question already had an answer."}
+                      </p>
+                    ) : (
+                      <div className="conversion-controls">
+                        <div className="conversion-actions">
+                          <button
+                            className="btn-primary"
+                            disabled={answerFill.status === "running"}
+                            onClick={async () => {
+                              const result = fullRun.result;
+                              if (!result || !selectedSchema || !settings) return;
+                              setAnswerFill({ status: "running" });
+                              try {
+                                const apiKey = await getApiKey();
+                                if (!apiKey) throw new Error("API key not found — set it in Settings.");
+                                const res = await runAnswerFill({
+                                  apiKey,
+                                  schema: selectedSchema.content,
+                                  settings,
+                                  cacheKey: result.cacheKey,
+                                  pageImages,
+                                  existingPages: result.pages,
+                                  onProgress: (ev) =>
+                                    setLogs((prev) => [
+                                      ...prev,
+                                      { ts: Date.now(), stage: ev.stage, message: ev.message, level: "info" },
+                                    ]),
+                                });
+                                setFullRun((s) =>
+                                  s.result
+                                    ? {
+                                        ...s,
+                                        result: {
+                                          ...s.result,
+                                          summary: {
+                                            ...s.result.summary,
+                                            needsReviewCount:
+                                              s.result.summary.needsReviewCount + res.filledCount,
+                                          },
+                                        },
+                                      }
+                                    : s,
+                                );
+                                setAnswerFill({ status: "done", filledCount: res.filledCount });
+                              } catch (err) {
+                                const message = err instanceof Error ? err.message : String(err);
+                                setLogs((prev) => [...prev, { ts: Date.now(), stage: "answer_fill", message, level: "error" }]);
+                                setAnswerFill({ status: "error", message });
+                              }
+                            }}
+                          >
+                            {answerFill.status === "running" ? "Answering…" : "Fill answers with AI"}
+                          </button>
+                        </div>
+                        {answerFill.status === "error" ? (
+                          <p className="status error">{answerFill.message}</p>
+                        ) : null}
+                      </div>
+                    )}
+                  </section>
+                );
+              })()
+            : null}
 
           {/* Validation errors card */}
           {phase.kind === "error" ? (
@@ -586,15 +779,25 @@ export function NewConversion({ onOpenInReview }: NewConversionInjectedProps) {
 
 interface AnalysisReadoutProps {
   result: DocumentAnalysisResult;
-  onConfirm: (format: ExamFormat) => void;
+  onConfirm: (format: ExamFormat, markingRegions: MarkingRegion[]) => void;
   onReset: () => void;
 }
 
 function AnalysisReadout({ result, onConfirm, onReset }: AnalysisReadoutProps) {
+  const regions = result.marking_regions ?? [];
+  const isMultiRegion = regions.length > 1;
   const [override, setOverride] = useState<ExamFormat>(result.marking_format);
+  // Per-region format overrides (only used when the document mixes marking methods).
+  const [regionFormats, setRegionFormats] = useState<ExamFormat[]>(() =>
+    regions.map((r) => r.marking_format),
+  );
   const mustConfirm = needsManualConfirmation(result.marking_format, result.marking_format_confidence);
   const confPct = (result.marking_format_confidence * 100).toFixed(0);
   const confClass = result.marking_format_confidence >= DETECTOR_AUTO_PROCEED_THRESHOLD ? "conf-high" : "conf-low";
+
+  // Build the marking regions to hand downstream, applying any per-region overrides.
+  const editedRegions = (): MarkingRegion[] =>
+    regions.map((r, i) => ({ ...r, marking_format: regionFormats[i] ?? r.marking_format }));
 
   return (
     <div className="detector-readout">
@@ -656,6 +859,8 @@ function AnalysisReadout({ result, onConfirm, onReset }: AnalysisReadoutProps) {
                 <th style={{ padding: "4px 8px" }}>MCQ</th>
                 <th style={{ padding: "4px 8px" }}>T/F</th>
                 <th style={{ padding: "4px 8px" }}>Written</th>
+                <th style={{ padding: "4px 8px" }}>Match</th>
+                <th style={{ padding: "4px 8px" }}>Img</th>
               </tr>
             </thead>
             <tbody>
@@ -669,6 +874,8 @@ function AnalysisReadout({ result, onConfirm, onReset }: AnalysisReadoutProps) {
                   <td style={{ padding: "3px 8px", textAlign: "center" }}>{p.mcq_count || ""}</td>
                   <td style={{ padding: "3px 8px", textAlign: "center" }}>{p.true_false_count || ""}</td>
                   <td style={{ padding: "3px 8px", textAlign: "center" }}>{p.written_count || ""}</td>
+                  <td style={{ padding: "3px 8px", textAlign: "center" }}>{p.matching_count || ""}</td>
+                  <td style={{ padding: "3px 8px", textAlign: "center" }}>{p.image_count || ""}</td>
                 </tr>
               ))}
             </tbody>
@@ -691,7 +898,60 @@ function AnalysisReadout({ result, onConfirm, onReset }: AnalysisReadoutProps) {
         ) : null}
       </div>
 
-      {mustConfirm ? (
+      {isMultiRegion ? (
+        <div className="must-confirm">
+          <p>
+            This document uses <strong>different marking methods across sections</strong>. Each
+            range below will be extracted with its own method — confirm or override each before continuing.
+          </p>
+          <div style={{ overflowX: "auto", marginTop: 8 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr style={{ textAlign: "left", borderBottom: "1px solid var(--border)" }}>
+                  <th style={{ padding: "4px 8px" }}>Questions</th>
+                  <th style={{ padding: "4px 8px" }}>Marking method</th>
+                  <th style={{ padding: "4px 8px" }}>Conf.</th>
+                  <th style={{ padding: "4px 8px" }}>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {regions.map((r, i) => (
+                  <tr key={`${r.question_range_start}-${r.question_range_end}-${i}`} style={{ borderBottom: "1px solid var(--border-faint)" }}>
+                    <td style={{ padding: "3px 8px", fontVariantNumeric: "tabular-nums" }}>
+                      {r.question_range_start}–{r.question_range_end}
+                    </td>
+                    <td style={{ padding: "3px 8px" }}>
+                      <select
+                        value={regionFormats[i] ?? r.marking_format}
+                        onChange={(e) =>
+                          setRegionFormats((prev) => {
+                            const next = [...prev];
+                            next[i] = e.target.value as ExamFormat;
+                            return next;
+                          })
+                        }
+                      >
+                        {EXAM_FORMATS.map((f) => (
+                          <option key={f} value={f}>
+                            {f}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td style={{ padding: "3px 8px" }}>{(r.confidence * 100).toFixed(0)}%</td>
+                    <td style={{ padding: "3px 8px", color: "var(--fg-secondary)" }}>{r.notes ?? ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="override-row" style={{ marginTop: 8 }}>
+            <button className="btn-primary" onClick={() => onConfirm(result.marking_format, editedRegions())}>
+              Confirm {regions.length} regions
+            </button>
+          </div>
+        </div>
+      ) : mustConfirm ? (
         <div className="must-confirm">
           <p>
             Low confidence or ambiguous — please confirm or override the format before continuing.
@@ -707,7 +967,7 @@ function AnalysisReadout({ result, onConfirm, onReset }: AnalysisReadoutProps) {
                 </option>
               ))}
             </select>
-            <button className="btn-primary" onClick={() => onConfirm(override)}>
+            <button className="btn-primary" onClick={() => onConfirm(override, editedRegions())}>
               Confirm {override}
             </button>
           </div>
@@ -718,7 +978,7 @@ function AnalysisReadout({ result, onConfirm, onReset }: AnalysisReadoutProps) {
             Confidence above {(DETECTOR_AUTO_PROCEED_THRESHOLD * 100).toFixed(0)}% — format confirmed automatically.
           </p>
           <div className="override-row">
-            <button className="btn-primary" onClick={() => onConfirm(result.marking_format)}>
+            <button className="btn-primary" onClick={() => onConfirm(result.marking_format, editedRegions())}>
               Use {result.marking_format}
             </button>
             <select
@@ -733,7 +993,7 @@ function AnalysisReadout({ result, onConfirm, onReset }: AnalysisReadoutProps) {
             </select>
             <button
               className="btn-secondary"
-              onClick={() => onConfirm(override)}
+              onClick={() => onConfirm(override, editedRegions())}
               disabled={override === result.marking_format}
             >
               Use override
@@ -755,6 +1015,9 @@ function AnalysisReadout({ result, onConfirm, onReset }: AnalysisReadoutProps) {
 
 interface NewConversionInjectedProps {
   onOpenInReview: (cacheKey: string) => void;
+  /** True while this tab is the visible view. The component stays mounted across tab
+   *  switches, so we use this to re-fetch saved schemas when the user returns. */
+  active?: boolean;
 }
 
 // ─── Ready to Extract Readout ────────────────────────────────────────────────

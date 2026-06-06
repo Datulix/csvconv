@@ -5,51 +5,18 @@
 
 export type SchemaVersion = 1;
 
-export type ContentType = "mcq" | "flashcard" | "qa_pair";
+// The schema's output focus:
+//   "mcq"  — normalize toward multiple-choice; offer to convert other question types → MCQ.
+//   "none" — mixed output; keep every question in its native type, no conversion offered.
+// Both use the same MCQ-based extraction pipeline; content_type only gates the conversion step.
+export type ContentType = "mcq" | "none";
 
 export type FieldType = "string" | "multiline_string" | "enum" | "number" | "boolean";
-
-/**
- * Semantic role tags drive app-controlled extraction. Roles must be valid for the
- * schema's `content_type` (enforced by the editor; see `contentTypes.ts`).
- */
-export type SemanticRole =
-  // shared
-  | "page_number"
-  | "is_partial"
-  // mcq
-  | "question_text"
-  | "question_number"
-  | "option_A"
-  | "option_B"
-  | "option_C"
-  | "option_D"
-  | "option_E"
-  | "options_concatenated"
-  | "correct_answer"
-  | "marking_style"
-  | "mcq_type"
-  // solver (mcq only, when ai_solve mode)
-  | "ai_answer"
-  | "ai_explanation"
-  | "ai_confidence"
-  | "agreement"
-  | "disagreement_reason"
-  // flashcard
-  | "term"
-  | "definition"
-  | "example"
-  // qa_pair
-  | "question"
-  | "answer"
-  // custom — extracted from the user's description alone
-  | null;
 
 export interface FieldDefinition {
   name: string;
   type: FieldType;
   enum_values?: string[];
-  semantic_role: SemanticRole;
   description: string;
   required: boolean;
   template?: string;

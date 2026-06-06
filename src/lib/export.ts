@@ -7,30 +7,10 @@ import type { ExtractedRow } from "../pipelines/extractors/types";
  *
  * For each field:
  *   - if `template` is set, render it with mustache-style `{{field}}` substitution against
- *     the canonical row data (supports nested `options.A` syntax).
- *   - if `semantic_role` is set and maps to a canonical field, read it directly.
- *   - if `semantic_role` is null, read the row by the field's `name`.
+ *     the row data (supports nested `options.A` syntax).
+ *   - otherwise read the row by the field's `name` (extraction is description-driven, so the
+ *     model fills each field under its declared name).
  */
-
-const SEMANTIC_ROLE_TO_KEY: Record<string, string> = {
-  question_text: "question_text",
-  question_number: "question_number",
-  correct_answer: "correct_answer",
-  marking_style: "marking_style",
-  mcq_type: "mcq_type",
-  page_number: "page_number",
-  is_partial: "is_partial",
-  term: "term",
-  definition: "definition",
-  example: "example",
-  question: "question",
-  answer: "answer",
-  ai_answer: "ai_answer",
-  ai_explanation: "ai_explanation",
-  ai_confidence: "ai_confidence",
-  agreement: "agreement",
-  disagreement_reason: "disagreement_reason",
-};
 
 function lookupNested(obj: unknown, path: string): unknown {
   const segments = path.split(".");
@@ -50,30 +30,20 @@ function renderTemplate(template: string, row: ExtractedRow): string {
   });
 }
 
-function resolveOptionsConcatenated(row: ExtractedRow): string {
-  const options = (row.options as Record<string, string | null> | undefined) ?? {};
-  return (["A", "B", "C", "D", "E"] as const)
-    .map((letter) => (options[letter] != null ? `${letter}) ${options[letter]}` : null))
-    .filter((s): s is string => s !== null)
-    .join("\n");
-}
-
 function resolveFieldValue(field: FieldDefinition, row: ExtractedRow): unknown {
   if (field.template) {
     return renderTemplate(field.template, row);
   }
-  if (field.semantic_role === "options_concatenated") {
-    return resolveOptionsConcatenated(row);
-  }
-  if (field.semantic_role && SEMANTIC_ROLE_TO_KEY[field.semantic_role]) {
-    return row[SEMANTIC_ROLE_TO_KEY[field.semantic_role]];
-  }
-  if (field.semantic_role && field.semantic_role.startsWith("option_")) {
-    const letter = field.semantic_role.slice("option_".length);
-    const options = (row.options as Record<string, string | null> | undefined) ?? {};
-    return options[letter] ?? null;
-  }
   return row[field.name];
+}
+
+/**
+ * Project a canonical row through the schema's fields, in field order. This is the single
+ * source of truth for "what the schema produces" — shared by CSV export and the Review table
+ * so the two can never diverge. Returns `{ name, value }` per field (column).
+ */
+export function projectRow(schema: Schema, row: ExtractedRow): Array<{ name: string; value: unknown }> {
+  return schema.fields.map((f) => ({ name: f.name, value: resolveFieldValue(f, row) }));
 }
 
 function csvEscape(value: unknown): string {
@@ -86,20 +56,12 @@ function csvEscape(value: unknown): string {
 }
 
 export function buildCsv(schema: Schema, rows: ExtractedRow[]): string {
-  const hasFigures = rows.some((row) => (row.figures as any)?.length > 0);
-  const headers = schema.fields.map((f) => csvEscape(f.name));
-  if (hasFigures) {
-    headers.push("figure_paths");
-  }
-  const headerLine = headers.join(",");
+  // The CSV contains exactly the schema's fields — no auto-appended columns. Figure crops
+  // are local file paths, not portable, so they are intentionally left out of the export.
+  const headerLine = schema.fields.map((f) => csvEscape(f.name)).join(",");
   const lines = [headerLine];
   for (const row of rows) {
-    const values = schema.fields.map((f) => csvEscape(resolveFieldValue(f, row)));
-    if (hasFigures) {
-      const figures = (row.figures as Array<{ path?: string }>) ?? [];
-      const paths = figures.map((f) => f.path).filter(Boolean).join(";");
-      values.push(csvEscape(paths));
-    }
+    const values = projectRow(schema, row).map((c) => csvEscape(c.value));
     lines.push(values.join(","));
   }
   return lines.join("\r\n") + "\r\n";

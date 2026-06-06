@@ -1,7 +1,7 @@
 import { callModel, type ContentPart } from "../../lib/modelClient";
 import type { ModelId } from "../../lib/models";
 import type { Schema } from "../../schema/types";
-import { MCQ_WRITTEN_ANSWER_PROMPT, STRICT_JSON_REMINDER } from "../prompts";
+import { ANSWER_FILL_PROMPT, STRICT_JSON_REMINDER } from "../prompts";
 import {
   buildCustomFieldsPromptBlock,
   buildMcqResponseSchema,
@@ -9,7 +9,7 @@ import {
 } from "./schemaBuilders";
 import { pageImageHint, type ExtractedBatch, type ExtractorPageInput } from "./types";
 
-export interface RunWrittenAnswerExtractorArgs {
+export interface RunAnswerFillExtractorArgs {
   apiKey: string;
   modelId: ModelId;
   schema: Schema;
@@ -17,18 +17,25 @@ export interface RunWrittenAnswerExtractorArgs {
   signal?: AbortSignal;
 }
 
-export function buildWrittenAnswerPrompt(schema: Schema): string {
-  return MCQ_WRITTEN_ANSWER_PROMPT + buildCustomFieldsPromptBlock(schema) + STRICT_JSON_REMINDER;
+/** Build the answer-fill prompt: fixed instructions + the user's custom-field block. */
+export function buildAnswerFillPrompt(schema: Schema): string {
+  return ANSWER_FILL_PROMPT + buildCustomFieldsPromptBlock(schema) + STRICT_JSON_REMINDER;
 }
 
-export async function runWrittenAnswerExtractor(
-  args: RunWrittenAnswerExtractorArgs,
+/**
+ * Answer every question on the given pages from the model's own knowledge, returning rows
+ * shaped to `schema` (with the answer fields filled). The orchestrator merges these answers
+ * into rows whose answer fields came out empty during extraction. Reuses the MCQ response/zod
+ * schema so custom answer fields (e.g. Triviadox's `correct_index`) are produced.
+ */
+export async function runAnswerFillExtractor(
+  args: RunAnswerFillExtractorArgs,
 ): Promise<ExtractedBatch> {
   if (args.pages.length === 0) {
-    throw new Error("runWrittenAnswerExtractor: no pages provided");
+    throw new Error("runAnswerFillExtractor: no pages provided");
   }
 
-  const systemInstruction = buildWrittenAnswerPrompt(args.schema);
+  const systemInstruction = buildAnswerFillPrompt(args.schema);
   const responseSchema = buildMcqResponseSchema(args.schema);
   const zodSchema = buildMcqZodSchema(args.schema);
 

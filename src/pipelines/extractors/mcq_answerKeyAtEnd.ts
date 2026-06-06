@@ -13,7 +13,7 @@ import {
   buildMcqResponseSchema,
   buildMcqZodSchema,
 } from "./schemaBuilders";
-import type { ExtractedBatch, ExtractorPageInput, OptionLetter } from "./types";
+import { pageImageHint, type ExtractedBatch, type ExtractorPageInput, type OptionLetter } from "./types";
 import type { PageMapEntry } from "../documentAnalyzer";
 
 /**
@@ -44,11 +44,6 @@ export function buildAnswerKeyBodyPrompt(schema: Schema): string {
 export async function runAnswerKeyBodyExtractor(
   args: RunAnswerKeyBodyExtractorArgs,
 ): Promise<ExtractedBatch> {
-  if (args.schema.content_type !== "mcq") {
-    throw new Error(
-      `runAnswerKeyBodyExtractor: schema.content_type must be "mcq", got "${args.schema.content_type}"`,
-    );
-  }
   if (args.pages.length === 0) {
     throw new Error("runAnswerKeyBodyExtractor: no pages provided");
   }
@@ -59,7 +54,7 @@ export async function runAnswerKeyBodyExtractor(
 
   const parts: ContentPart[] = [];
   for (const page of args.pages) {
-    parts.push({ kind: "text", text: `PAGE ${page.pageNumber}${page.has_images ? " [this page contains figures/images]" : ""}:` });
+    parts.push({ kind: "text", text: `PAGE ${page.pageNumber}${pageImageHint(page)}:` });
     parts.push({
       kind: "image",
       mimeType: page.mimeType ?? "image/jpeg",
@@ -187,6 +182,13 @@ export function patchWithAnswerKey(
   body: ExtractedBatch,
   key: AnswerKeyResult,
   pageMap: PageMapEntry[] = [],
+  /**
+   * Optional predicate restricting which body rows are eligible for patching. Used for
+   * mixed-format documents where only a sub-range of questions uses answer_key_at_end —
+   * rows outside that range (e.g. inline-marked questions) are left untouched. Defaults
+   * to patching every row.
+   */
+  isPatchable: (questionNumber: string, pageNumber: number) => boolean = () => true,
 ): { batch: ExtractedBatch; summary: PatchSummary } {
   // Build a page-number → section_label lookup from the document analysis page map
   const pageSectionMap = new Map<number, string | null>();
@@ -209,6 +211,9 @@ export function patchWithAnswerKey(
     const pageSection = pageSectionMap.get(page.page_number) ?? null;
     for (const row of page.rows) {
       const qn = String(row.question_number ?? "");
+      // Skip rows outside the answer-key region(s) — e.g. inline-marked questions in a
+      // mixed-format document that already have their own correct_answer.
+      if (!isPatchable(qn, page.page_number)) continue;
       // Try compound key first (section-aware), then fall back to bare question number
       const entry =
         keyMap.get(compoundKey(hasSections ? pageSection : null, qn)) ??

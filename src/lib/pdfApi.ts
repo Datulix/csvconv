@@ -23,6 +23,8 @@ export interface RasterizedPage {
   width: number;
   height: number;
   deskewed: boolean;
+  /** Skew angle (deg) applied to the page; the crop step re-applies it so boxes stay aligned. */
+  skew_angle_deg: number;
   skipped: boolean;
 }
 
@@ -71,14 +73,26 @@ export async function readImageAsBase64(path: string): Promise<string> {
   return invoke<string>("read_image_as_base64", { path });
 }
 
+/** Copy the source PDF into the app data dir (keyed by sha256); returns the stored path. */
+export async function storeSourcePdf(pdfPath: string, sha256: string): Promise<string> {
+  return invoke<string>("store_source_pdf", { pdfPath, sha256 });
+}
+
 export async function cleanupStaging(runId: string): Promise<void> {
   await invoke("cleanup_staging", { runId });
 }
 
 export interface CropJob {
   jobId: string;
-  srcPath: string;
+  /** Source PDF — re-rendered at high DPI for a crisp crop instead of cropping the page JPEG. */
+  pdfPath: string;
+  password?: string | null;
+  pageNumber: number;
   destPath: string;
+  /** DPI to render the source page at before cropping. */
+  renderDpi: number;
+  /** Same skew angle rasterize applied to this page, so the box still lines up. */
+  skewAngleDeg: number;
   ymin: number;
   xmin: number;
   ymax: number;

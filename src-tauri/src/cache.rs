@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS runs (
   cache_key TEXT PRIMARY KEY,
   pdf_sha256 TEXT,
   schema_hash TEXT,
+  schema_json TEXT,
   mode TEXT,
   content_type TEXT,
   confirmed_format TEXT,
@@ -85,11 +86,14 @@ pub struct RowRecord {
     pub awaiting_answer_key: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(default)]
 pub struct RunRecord {
     pub cache_key: String,
     pub pdf_sha256: Option<String>,
+    pub source_path: Option<String>,
     pub schema_hash: Option<String>,
+    pub schema_json: Option<String>,
     pub mode: Option<String>,
     pub content_type: Option<String>,
     pub confirmed_format: Option<String>,
@@ -108,6 +112,16 @@ impl Cache {
             .with_context(|| format!("opening cache db at {}", db_path.display()))?;
         conn.execute_batch(MIGRATIONS)
             .context("running cache migrations")?;
+        // Idempotent column adds for DBs created before these columns existed.
+        // SQLite has no "ADD COLUMN IF NOT EXISTS", so we run the ALTER and ignore the
+        // "duplicate column name" error that fires when the column is already present.
+        for stmt in [
+            "ALTER TABLE runs ADD COLUMN schema_json TEXT",
+            "ALTER TABLE runs ADD COLUMN settings_json TEXT",
+            "ALTER TABLE runs ADD COLUMN source_path TEXT",
+        ] {
+            let _ = conn.execute(stmt, []);
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -279,12 +293,14 @@ impl Cache {
         let now = chrono_now();
         let started_at = record.started_at.clone().unwrap_or_else(|| now.clone());
         conn.execute(
-            "INSERT INTO runs (cache_key, pdf_sha256, schema_hash, mode, content_type,
+            "INSERT INTO runs (cache_key, pdf_sha256, source_path, schema_hash, schema_json, mode, content_type,
                confirmed_format, state, started_at, finished_at, token_usage, cost)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(cache_key) DO UPDATE SET
                pdf_sha256=COALESCE(excluded.pdf_sha256, runs.pdf_sha256),
+               source_path=COALESCE(excluded.source_path, runs.source_path),
                schema_hash=COALESCE(excluded.schema_hash, runs.schema_hash),
+               schema_json=COALESCE(excluded.schema_json, runs.schema_json),
                mode=COALESCE(excluded.mode, runs.mode),
                content_type=COALESCE(excluded.content_type, runs.content_type),
                confirmed_format=COALESCE(excluded.confirmed_format, runs.confirmed_format),
@@ -295,7 +311,9 @@ impl Cache {
             params![
                 record.cache_key,
                 record.pdf_sha256,
+                record.source_path,
                 record.schema_hash,
+                record.schema_json,
                 record.mode,
                 record.content_type,
                 record.confirmed_format,
@@ -334,11 +352,30 @@ impl Cache {
         Ok(out)
     }
 
+    /// Recover the original source PDF path for a run. Prefers the path recorded
+    /// on the run itself, falling back to the pdfs table. Returns None when no
+    /// path is recorded (e.g. older runs from before source_path was stored).
+    pub fn get_pdf_path_for_run(&self, cache_key: &str) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        let conn = self.conn.lock().map_err(|_| anyhow::anyhow!("cache mutex poisoned"))?;
+        let path: Option<String> = conn
+            .query_row(
+                "SELECT COALESCE(r.source_path, p.path)
+                 FROM runs r LEFT JOIN pdfs p ON r.pdf_sha256 = p.sha256
+                 WHERE r.cache_key = ?1",
+                params![cache_key],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(path)
+    }
+
     pub fn list_runs(&self) -> Result<Vec<RunRecord>> {
         let conn = self.conn.lock().map_err(|_| anyhow::anyhow!("cache mutex poisoned"))?;
         let mut stmt = conn.prepare(
-            "SELECT cache_key, pdf_sha256, schema_hash, mode, content_type, confirmed_format,
-              state, started_at, finished_at, token_usage, cost
+            "SELECT cache_key, pdf_sha256, schema_hash, schema_json, mode, content_type, confirmed_format,
+              state, started_at, finished_at, token_usage, cost, source_path
              FROM runs ORDER BY started_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -346,14 +383,16 @@ impl Cache {
                 cache_key: row.get(0)?,
                 pdf_sha256: row.get(1)?,
                 schema_hash: row.get(2)?,
-                mode: row.get(3)?,
-                content_type: row.get(4)?,
-                confirmed_format: row.get(5)?,
-                state: row.get(6)?,
-                started_at: row.get(7)?,
-                finished_at: row.get(8)?,
-                token_usage: row.get(9)?,
-                cost: row.get(10)?,
+                schema_json: row.get(3)?,
+                mode: row.get(4)?,
+                content_type: row.get(5)?,
+                confirmed_format: row.get(6)?,
+                state: row.get(7)?,
+                started_at: row.get(8)?,
+                finished_at: row.get(9)?,
+                token_usage: row.get(10)?,
+                cost: row.get(11)?,
+                source_path: row.get(12)?,
             })
         })?;
         let mut out: Vec<RunRecord> = Vec::new();

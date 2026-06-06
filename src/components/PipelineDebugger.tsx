@@ -286,6 +286,13 @@ function renderAnalyzeOutput(output: unknown) {
     total_questions?: number | null;
     total_mcq_count?: number | null;
     has_answer_key?: boolean;
+    marking_regions?: Array<{
+      question_range_start: number;
+      question_range_end: number;
+      marking_format: string;
+      confidence: number;
+      notes?: string | null;
+    }>;
     page_map?: Array<{
       page_number: number;
       content_type: string;
@@ -293,13 +300,25 @@ function renderAnalyzeOutput(output: unknown) {
       mcq_count: number;
       true_false_count: number;
       written_count: number;
+      matching_count?: number;
+      image_count?: number;
     }>;
     note?: string;
   };
-  if (o.note) return <Section label="Result"><div className="dbg-note">{o.note}</div></Section>;
   const conf = typeof o.marking_format_confidence === "number" ? o.marking_format_confidence : null;
+  // A `note` (e.g. "Pre-computed from conversion flow") is shown as a banner, but the full
+  // structural breakdown is still rendered below since the analysis data is spread alongside it.
+  const hasData = o.document_summary || o.marking_format || (o.page_map && o.page_map.length > 0);
+  if (o.note && !hasData) {
+    return <Section label="Result"><div className="dbg-note">{o.note}</div></Section>;
+  }
   return (
     <>
+      {o.note && (
+        <Section label="Note">
+          <div className="dbg-note">{o.note}</div>
+        </Section>
+      )}
       {o.document_summary && (
         <Section label="Document summary">
           <div style={{ fontSize: 13, lineHeight: 1.5 }}>{o.document_summary}</div>
@@ -315,11 +334,30 @@ function renderAnalyzeOutput(output: unknown) {
           ["Answer key present", o.has_answer_key === true ? <Badge text="yes" color="green" /> : o.has_answer_key === false ? "no" : "—"],
         ]} />
       </Section>
+      {o.marking_regions && o.marking_regions.length > 1 && (
+        <Section label={`Marking regions (${o.marking_regions.length})`}>
+          <table className="dbg-table">
+            <thead>
+              <tr><th>Questions</th><th>Method</th><th>Conf.</th><th>Notes</th></tr>
+            </thead>
+            <tbody>
+              {o.marking_regions.map((r, i) => (
+                <tr key={`${r.question_range_start}-${r.question_range_end}-${i}`}>
+                  <td>{r.question_range_start}–{r.question_range_end}</td>
+                  <td><Badge text={r.marking_format} color="purple" /></td>
+                  <td style={{ textAlign: "center" }}>{(r.confidence * 100).toFixed(0)}%</td>
+                  <td style={{ maxWidth: 260, fontSize: 11, color: "var(--fg-muted)" }}>{r.notes ?? ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Section>
+      )}
       {o.page_map && o.page_map.length > 0 && (
         <Section label={`Per-page breakdown (${o.page_map.length} pages)`}>
           <table className="dbg-table">
             <thead>
-              <tr><th>Page</th><th>Type</th><th>Summary</th><th>MCQ</th><th>T/F</th><th>Written</th></tr>
+              <tr><th>Page</th><th>Type</th><th>Summary</th><th>MCQ</th><th>T/F</th><th>Written</th><th>Match</th><th>Img</th></tr>
             </thead>
             <tbody>
               {o.page_map.map((p) => (
@@ -330,6 +368,8 @@ function renderAnalyzeOutput(output: unknown) {
                   <td style={{ textAlign: "center" }}>{p.mcq_count || ""}</td>
                   <td style={{ textAlign: "center" }}>{p.true_false_count || ""}</td>
                   <td style={{ textAlign: "center" }}>{p.written_count || ""}</td>
+                  <td style={{ textAlign: "center" }}>{p.matching_count || ""}</td>
+                  <td style={{ textAlign: "center" }}>{p.image_count || ""}</td>
                 </tr>
               ))}
             </tbody>

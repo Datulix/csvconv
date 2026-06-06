@@ -31,5 +31,7 @@ imageproc = "0.25"
 sha2 = "0.10"
 anyhow = "1"
 thiserror = "1"
+# keyring has no Android backend; Android uses a file-based fallback in keychain.rs
+[target.'cfg(not(target_os = "android"))'.dependencies]
 keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }
 

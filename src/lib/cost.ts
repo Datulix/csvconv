@@ -1,6 +1,7 @@
 import { SUPPORTED_MODELS, type ModelId } from "./models";
 import type { AppSettings } from "./settings";
 import type { RunMode } from "../schema/contentTypes";
+import type { ContentType } from "../schema/types";
 
 /**
  * Cost preview helpers. See SPEC §9.3 — the UI shows a range, not a single number,
@@ -67,7 +68,7 @@ function dollarsFromTokens(input: number, output: number, modelId: ModelId | nul
 export interface CostInputs {
   pageCount: number;
   mode: RunMode;
-  contentType: "mcq" | "flashcard" | "qa_pair";
+  contentType: ContentType;
   settings: AppSettings;
 }
 
@@ -82,10 +83,10 @@ function modelForStage(stage: StageId, settings: AppSettings): ModelId | null {
 }
 
 export function estimateCost(inputs: CostInputs): CostEstimate {
-  const { pageCount, mode, contentType, settings } = inputs;
+  const { pageCount, mode, settings } = inputs;
   const stages: StageCost[] = [];
 
-  const detectorApplies = contentType === "mcq" && mode !== "answer";
+  const detectorApplies = mode !== "answer";
   if (detectorApplies) {
     const det = detectorTokens(DETECTOR_SAMPLES);
     const modelId = modelForStage("detector", settings);
@@ -134,7 +135,7 @@ export function estimateCost(inputs: CostInputs): CostEstimate {
     });
   }
 
-  if (pageCount > 0 && (mode === "review" || mode === "answer") && contentType === "mcq") {
+  if (pageCount > 0 && (mode === "review" || mode === "answer")) {
     const per = solverTokensPerQuestion();
     const modelId = modelForStage("solver", settings);
     const qLow = pageCount * QUESTIONS_PER_PAGE_LOW;

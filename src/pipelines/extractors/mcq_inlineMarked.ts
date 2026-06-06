@@ -7,7 +7,7 @@ import {
   buildInlineMarkedResponseSchema,
   buildInlineMarkedZodSchema,
 } from "./schemaBuilders";
-import type { ExtractedBatch, ExtractorPageInput } from "./types";
+import { pageImageHint, type ExtractedBatch, type ExtractorPageInput } from "./types";
 
 export interface RunInlineMarkedExtractorArgs {
   apiKey: string;
@@ -36,11 +36,6 @@ export function buildInlineMarkedPrompt(schema: Schema): string {
 export async function runInlineMarkedExtractor(
   args: RunInlineMarkedExtractorArgs,
 ): Promise<ExtractedBatch> {
-  if (args.schema.content_type !== "mcq") {
-    throw new Error(
-      `runInlineMarkedExtractor: schema.content_type must be "mcq", got "${args.schema.content_type}"`,
-    );
-  }
   if (args.pages.length === 0) {
     throw new Error("runInlineMarkedExtractor: no pages provided");
   }
@@ -51,7 +46,7 @@ export async function runInlineMarkedExtractor(
 
   const parts: ContentPart[] = [];
   for (const page of args.pages) {
-    parts.push({ kind: "text", text: `PAGE ${page.pageNumber}${page.has_images ? " [this page contains figures/images]" : ""}:` });
+    parts.push({ kind: "text", text: `PAGE ${page.pageNumber}${pageImageHint(page)}:` });
     parts.push({
       kind: "image",
       mimeType: page.mimeType ?? "image/jpeg",

@@ -31,7 +31,9 @@ export interface SqliteRowRecord {
 export interface SqliteRunRecord {
   cache_key: string;
   pdf_sha256?: string | null;
+  source_path?: string | null;
   schema_hash?: string | null;
+  schema_json?: string | null;
   mode?: string | null;
   content_type?: string | null;
   confirmed_format?: string | null;
@@ -121,6 +123,11 @@ export async function upsertRun(record: SqliteRunRecord): Promise<void> {
 
 export async function listRuns(): Promise<SqliteRunRecord[]> {
   return invoke<SqliteRunRecord[]>("cache_list_runs");
+}
+
+/** Base64 of the run's original source PDF, for previewing it in the Review UI. */
+export async function getRunPdfBase64(cacheKey: string): Promise<string> {
+  return invoke<string>("read_run_pdf_base64", { cacheKey });
 }
 
 export async function saveTrace(runId: string, traceJson: string): Promise<void> {

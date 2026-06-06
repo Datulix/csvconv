@@ -11,6 +11,17 @@ use std::sync::Mutex;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|_app| {
+            // Android: initialise the file-based keychain with the app data directory.
+            #[cfg(target_os = "android")]
+            {
+                use tauri::Manager;
+                if let Ok(dir) = _app.path().app_data_dir() {
+                    keychain::set_data_dir(dir);
+                }
+            }
+            Ok(())
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(commands::CacheState(Mutex::new(None)))
@@ -45,11 +56,10 @@ pub fn run() {
             commands::cache_load_rows,
             commands::cache_upsert_run,
             commands::cache_list_runs,
+            commands::read_run_pdf_base64,
+            commands::store_source_pdf,
             commands::cache_save_trace,
             commands::cache_load_all_traces,
-            commands::crop_figures_batch,
-            commands::figures_dir,
-            commands::cleanup_figures,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

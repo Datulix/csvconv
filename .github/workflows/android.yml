@@ -1,0 +1,74 @@
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK and platform
+        run: |
+          sdkmanager "ndk;27.0.12077973" "build-tools;34.0.0" "platforms;android-34"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> $GITHUB_ENV
+
+      - name: Install Rust with Android arm64 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Initialize Tauri Android project
+        run: npm run tauri android init
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          NDK_HOME: ${{ env.NDK_HOME }}
+
+      - name: Download pdfium for Android arm64
+        run: |
+          curl -L "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-android-arm64.tgz" -o pdfium-android-arm64.tgz
+          mkdir -p /tmp/pdfium-arm64
+          tar xzf pdfium-android-arm64.tgz -C /tmp/pdfium-arm64
+          mkdir -p src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a
+          cp /tmp/pdfium-arm64/lib/libpdfium.so src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a/
+
+      - name: Build Android APK (debug, arm64)
+        run: npm run tauri android build -- --debug --apk --target aarch64
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          NDK_HOME: ${{ env.NDK_HOME }}
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: csvconv-android-arm64-debug
+          path: src-tauri/gen/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

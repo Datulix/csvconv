@@ -10,18 +10,30 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
 
 fn make_pdfium() -> Result<Pdfium, String> {
-    // Resolve the DLL path relative to the running executable so it works in
-    // both dev (target/debug/) and production (installer dir).
-    let lib_path = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("pdfium.dll")))
-        .filter(|p| p.exists())
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "pdfium.dll".to_string());
+    #[cfg(target_os = "android")]
+    {
+        // On Android, libpdfium.so is placed in jniLibs and extracted by the
+        // system to the app's native library directory, which is on LD_LIBRARY_PATH.
+        return Pdfium::bind_to_library("libpdfium.so")
+            .map(Pdfium::new)
+            .map_err(|e| format!("failed to load pdfium: {e}"));
+    }
 
-    Pdfium::bind_to_library(lib_path)
-        .map(Pdfium::new)
-        .map_err(|e| format!("failed to load pdfium: {e}"))
+    #[cfg(not(target_os = "android"))]
+    {
+        // Resolve the DLL path relative to the running executable so it works in
+        // both dev (target/debug/) and production (installer dir).
+        let lib_path = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("pdfium.dll")))
+            .filter(|p| p.exists())
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "pdfium.dll".to_string());
+
+        Pdfium::bind_to_library(lib_path)
+            .map(Pdfium::new)
+            .map_err(|e| format!("failed to load pdfium: {e}"))
+    }
 }
 
 fn staging_dir_for(app: &AppHandle, run_id: &str) -> Result<PathBuf, String> {
@@ -344,6 +356,24 @@ pub fn cache_list_runs(
     with_cache(&app, &state, |c| c.list_runs().map_err(|e| format!("{e:#}")))
 }
 
+/// Read the original source PDF for a run and return it base64-encoded, so the
+/// Review UI can show it in a blob iframe without widening the asset scope.
+#[tauri::command]
+pub fn read_run_pdf_base64(
+    app: AppHandle,
+    state: State<'_, CacheState>,
+    cache_key: String,
+) -> Result<String, String> {
+    use base64::Engine;
+    let path = with_cache(&app, &state, |c| {
+        c.get_pdf_path_for_run(&cache_key).map_err(|e| format!("{e:#}"))
+    })?;
+    let path = path.ok_or_else(|| "no source PDF recorded for this run".to_string())?;
+    let bytes = std::fs::read(&path)
+        .map_err(|e| format!("source PDF unavailable ({path}): {e}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
 #[tauri::command]
 pub fn cache_save_trace(
     app: AppHandle,
@@ -368,9 +398,12 @@ pub fn cache_load_all_traces(
 pub async fn crop_figures_batch(
     jobs: Vec<pdf::CropJob>,
 ) -> Result<Vec<pdf::CropResult>, String> {
-    tauri::async_runtime::spawn_blocking(move || Ok(pdf::crop_figures_batch(&jobs)))
-        .await
-        .map_err(|e| format!("thread error: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        let pdfium = make_pdfium()?;
+        Ok(pdf::crop_figures_batch(&pdfium, &jobs))
+    })
+    .await
+    .map_err(|e| format!("thread error: {e}"))?
 }
 
 #[tauri::command]
@@ -383,4 +416,21 @@ pub fn figures_dir(app: AppHandle, cache_key: String) -> Result<String, String> 
 #[tauri::command]
 pub fn cleanup_figures(app: AppHandle, cache_key: String) -> Result<(), String> {
     pdf::cleanup_figures(&app_data_dir(&app)?, &cache_key).map_err(|e| format!("{e:#}"))
+}
+
+/// Copy a source PDF into the app's data dir (keyed by its sha256, so identical
+/// documents are stored once) and return the stored path. Lets the Review PDF
+/// panel keep working even if the user later moves or deletes the original.
+#[tauri::command]
+pub fn store_source_pdf(app: AppHandle, pdf_path: String, sha256: String) -> Result<String, String> {
+    let dir = app_data_dir(&app)?.join("sources");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir sources: {e}"))?;
+    // sha256 is hex, but filter defensively to a safe filename.
+    let key: String = sha256.chars().filter(|c| c.is_ascii_alphanumeric()).take(64).collect();
+    let key = if key.is_empty() { "source".to_string() } else { key };
+    let dest = dir.join(format!("{key}.pdf"));
+    if !dest.exists() {
+        std::fs::copy(&pdf_path, &dest).map_err(|e| format!("copy source pdf: {e}"))?;
+    }
+    Ok(dest.to_string_lossy().into_owned())
 }

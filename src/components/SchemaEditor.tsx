@@ -4,11 +4,10 @@ import type {
   FieldDefinition,
   FieldType,
   Schema,
-  SemanticRole,
 } from "../schema/types";
 import { CURRENT_SCHEMA_VERSION } from "../schema/types";
-import { CONTENT_TYPES, isRoleValid, rolesFor } from "../schema/contentTypes";
-import { PRESETS, presetsByContentType, type SchemaPreset } from "../schema/presets";
+import { CONTENT_TYPES } from "../schema/contentTypes";
+import { PRESETS, type SchemaPreset } from "../schema/presets";
 import { schemaHash } from "../schema/hash";
 import {
   loadSchemas,
@@ -34,7 +33,6 @@ function emptyField(): FieldDefinition {
   return {
     name: "new_field",
     type: "string",
-    semantic_role: null,
     description: "",
     required: false,
   };
@@ -104,17 +102,6 @@ export function SchemaEditor() {
 
   function addField() {
     setCurrent((s) => ({ ...s, fields: [...s.fields, emptyField()] }));
-    setDirty(true);
-  }
-
-  function changeContentType(ct: ContentType) {
-    setCurrent((s) => {
-      const cleaned = s.fields.map((f) => ({
-        ...f,
-        semantic_role: isRoleValid(ct, f.semantic_role) ? f.semantic_role : null,
-      }));
-      return { ...s, content_type: ct, fields: cleaned };
-    });
     setDirty(true);
   }
 
@@ -229,7 +216,6 @@ export function SchemaEditor() {
             placeholder="Schema name"
           />
           <div className="schema-meta">
-            <span className="badge">{current.content_type}</span>
             <span className="hash" title="schema_hash for cache key">
               {hash ? `#${hash.slice(0, 10)}` : "computing…"}
             </span>
@@ -239,30 +225,26 @@ export function SchemaEditor() {
         </header>
 
         <section className="card">
-          <label className="block-label">Content type</label>
-          <div className="content-type-grid">
-            {Object.values(CONTENT_TYPES).map((ct) => (
+          <label className="block-label">Output focus</label>
+          <p className="hint">
+            What this schema produces. <strong>MCQ</strong> offers to convert other question types
+            into multiple-choice after extraction; <strong>Mixed</strong> keeps every question in its
+            native type.
+          </p>
+          <div className="focus-select-row">
+            {(Object.values(CONTENT_TYPES)).map((ct) => (
               <label
                 key={ct.id}
-                className={`content-type-card ${
-                  current.content_type === ct.id ? "selected" : ""
-                }`}
+                className={`focus-option ${current.content_type === ct.id ? "selected" : ""}`}
               >
                 <input
                   type="radio"
-                  name="content-type"
+                  name="content-focus"
                   checked={current.content_type === ct.id}
-                  onChange={() => changeContentType(ct.id)}
+                  onChange={() => updateSchema({ content_type: ct.id as ContentType })}
                 />
-                <div className="content-type-title">{ct.label}</div>
-                <div className="content-type-desc">{ct.description}</div>
-                <div className="content-type-flags">
-                  {ct.supportsDetector ? <span className="chip">detector</span> : null}
-                  {ct.supportsSolver ? <span className="chip">solver</span> : null}
-                  <span className="chip">
-                    modes: {ct.supportedModes.join(" / ")}
-                  </span>
-                </div>
+                <span className="focus-option-label">{ct.label}</span>
+                <span className="focus-option-desc">{ct.description}</span>
               </label>
             ))}
           </div>
@@ -271,11 +253,10 @@ export function SchemaEditor() {
         <section className="card">
           <label className="block-label">Apply a preset</label>
           <p className="hint">
-            Shipped presets for the selected content type. Picking one overwrites the current
-            field list.
+            Shipped starting points. Picking one overwrites the current field list.
           </p>
           <div className="preset-grid">
-            {presetsByContentType(current.content_type).map((p) => (
+            {PRESETS.map((p) => (
               <button
                 key={p.id}
                 type="button"
@@ -285,37 +266,10 @@ export function SchemaEditor() {
                 <div className="preset-title">{p.label}</div>
                 <div className="preset-desc">{p.description}</div>
                 <div className="preset-meta">
-                  <span className="chip">{p.recommendedMode}</span>
                   <span className="chip">{p.schema.fields.length} fields</span>
                 </div>
               </button>
             ))}
-          </div>
-          <div className="preset-other">
-            {PRESETS.filter((p) => p.schema.content_type !== current.content_type).length > 0 ? (
-              <details>
-                <summary>Show presets for other content types</summary>
-                <div className="preset-grid">
-                  {PRESETS.filter((p) => p.schema.content_type !== current.content_type).map(
-                    (p) => (
-                      <button
-                        key={p.id}
-                        type="button"
-                        className="preset-card faded"
-                        onClick={() => applyPreset(p)}
-                      >
-                        <div className="preset-title">{p.label}</div>
-                        <div className="preset-desc">{p.description}</div>
-                        <div className="preset-meta">
-                          <span className="chip">{p.schema.content_type}</span>
-                          <span className="chip">{p.recommendedMode}</span>
-                        </div>
-                      </button>
-                    ),
-                  )}
-                </div>
-              </details>
-            ) : null}
           </div>
         </section>
 
@@ -338,7 +292,6 @@ export function SchemaEditor() {
                   field={field}
                   index={idx}
                   total={current.fields.length}
-                  contentType={current.content_type}
                   onChange={(patch) => updateField(idx, patch)}
                   onMove={(delta) => moveField(idx, delta)}
                   onRemove={() => removeField(idx)}
@@ -397,7 +350,6 @@ interface FieldRowProps {
   field: FieldDefinition;
   index: number;
   total: number;
-  contentType: ContentType;
   onChange: (patch: Partial<FieldDefinition>) => void;
   onMove: (delta: number) => void;
   onRemove: () => void;
@@ -407,20 +359,10 @@ function FieldRow({
   field,
   index,
   total,
-  contentType,
   onChange,
   onMove,
   onRemove,
 }: FieldRowProps) {
-  const validRoles: Array<Exclude<SemanticRole, null>> = useMemo(
-    () => rolesFor(contentType),
-    [contentType],
-  );
-
-  function setRole(value: string) {
-    onChange({ semantic_role: value === "" ? null : (value as SemanticRole) });
-  }
-
   function setType(value: FieldType) {
     if (value === "enum" && (!field.enum_values || field.enum_values.length === 0)) {
       onChange({ type: value, enum_values: ["A", "B"] });
@@ -470,20 +412,6 @@ function FieldRow({
               {FIELD_TYPES.map((t) => (
                 <option key={t} value={t}>
                   {t}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="field-col flex-2">
-            <label>Semantic role</label>
-            <select
-              value={field.semantic_role ?? ""}
-              onChange={(e) => setRole(e.target.value)}
-            >
-              <option value="">(custom — extracted from description)</option>
-              {validRoles.map((r) => (
-                <option key={r} value={r}>
-                  {r}
                 </option>
               ))}
             </select>
@@ -579,11 +507,6 @@ function validateSchema(schema: Schema): ValidationResult {
       errors.push(`${fieldLabel}: duplicate field name "${f.name}".`);
     } else {
       namesSeen.add(f.name);
-    }
-    if (f.semantic_role !== null && !isRoleValid(schema.content_type, f.semantic_role)) {
-      errors.push(
-        `${fieldLabel}: semantic_role "${f.semantic_role}" is not valid for content_type "${schema.content_type}".`,
-      );
     }
     if (f.type === "enum" && (!f.enum_values || f.enum_values.length === 0)) {
       errors.push(`${fieldLabel}: enum type requires at least one enum value.`);

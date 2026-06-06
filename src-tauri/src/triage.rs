@@ -124,10 +124,7 @@ fn is_visually_blank(page: &PdfPage) -> Result<bool> {
     Ok(range < 12 && mean > 235)
 }
 
-fn estimate_skew(page: &PdfPage) -> Result<f32> {
-    use imageproc::edges::canny;
-    use imageproc::hough::{detect_lines, LineDetectionOptions};
-
+pub(crate) fn estimate_skew(page: &PdfPage) -> Result<f32> {
     let bitmap = page
         .render_with_config(
             &PdfRenderConfig::new()
@@ -135,17 +132,23 @@ fn estimate_skew(page: &PdfPage) -> Result<f32> {
                 .render_form_data(false),
         )
         .context("failed to render thumbnail for skew detection")?;
-    let image = bitmap.as_image();
-    let gray = image.to_luma8();
-    let edges = canny(&gray, 50.0, 100.0);
+    let gray = bitmap.as_image().to_luma8();
+    Ok(estimate_skew_luma(&gray, 1))
+}
+
+/// Estimate the dominant skew angle (degrees, within ±20°) of a grayscale image
+/// from its strongest near-axis edges. Returns 0.0 when fewer than `min_lines`
+/// supporting lines are found, which the caller should treat as "don't rotate".
+pub(crate) fn estimate_skew_luma(gray: &image::GrayImage, min_lines: usize) -> f32 {
+    use imageproc::edges::canny;
+    use imageproc::hough::{detect_lines, LineDetectionOptions};
+
+    let edges = canny(gray, 50.0, 100.0);
     let opts = LineDetectionOptions {
         vote_threshold: 60,
         suppression_radius: 6,
     };
     let lines = detect_lines(&edges, opts);
-    if lines.is_empty() {
-        return Ok(0.0);
-    }
 
     let mut angles: Vec<f32> = lines
         .iter()
@@ -162,10 +165,9 @@ fn estimate_skew(page: &PdfPage) -> Result<f32> {
         .filter(|a| a.abs() < 20.0)
         .collect();
 
-    if angles.is_empty() {
-        return Ok(0.0);
+    if angles.len() < min_lines.max(1) {
+        return 0.0;
     }
     angles.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let median = angles[angles.len() / 2];
-    Ok(median)
+    angles[angles.len() / 2]
 }

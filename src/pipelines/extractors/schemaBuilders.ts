@@ -10,12 +10,26 @@ import {
 } from "./types";
 
 /**
- * Custom-only fields = the user's declared fields that aren't covered by a canonical
- * semantic role (semantic_role = null) AND aren't computed from a template.
- * These are the ones we ask the model to extract by their user-defined name.
+ * Pipeline-internal canonical keys always extracted by the fixed response schema.
+ * User fields whose names collide with these don't need separate extraction — the
+ * canonical path already populates them.
+ */
+const CANONICAL_ROW_KEYS = new Set([
+  "question_number", "question_text", "correct_answer",
+  "marking_style", "mcq_type", "multiple_marks_detected", "is_partial",
+  "confidence", "notes", "source_snippet", "depends_on", "context_group",
+  "figures", "page_number",
+  // "options" intentionally excluded so user schemas can define their own
+  // options field (e.g. a JSON array) which overrides the canonical nested object.
+]);
+
+/**
+ * Fields to ask the model to extract directly by name + description.
+ * Includes every user-defined field that isn't a template and doesn't
+ * shadow a canonical pipeline key (those are already extracted internally).
  */
 export function customExtractFields(schema: Schema): FieldDefinition[] {
-  return schema.fields.filter((f) => f.semantic_role === null && !f.template);
+  return schema.fields.filter((f) => !f.template && !CANONICAL_ROW_KEYS.has(f.name));
 }
 
 /** Convert a user FieldDefinition to a JSON-schema property for Gemini responseSchema. */
@@ -71,12 +85,32 @@ function fieldToZod(field: FieldDefinition): z.ZodTypeAny {
  *
  * Used by all MCQ extractor variants (inline-marked, written-answer, answer-key-at-end).
  */
-export function buildMcqResponseSchema(schema: Schema): ResponseSchema {
+/** Source question types a conversion pass can recast into MCQ. */
+export const CONVERSION_SOURCE_TYPES = ["matching", "written", "true_false"] as const;
+
+export interface McqSchemaOptions {
+  /**
+   * When true, add conversion-provenance fields (`converted_from`, `ai_generated_options`,
+   * `source_question_number`) so a single converter can recast any source type and tag
+   * each row with its origin.
+   */
+  includeConversionFields?: boolean;
+}
+
+export function buildMcqResponseSchema(schema: Schema, opts: McqSchemaOptions = {}): ResponseSchema {
   const custom = customExtractFields(schema);
   const customProps: Record<string, unknown> = {};
   for (const f of custom) {
     customProps[f.name] = fieldToJsonProperty(f);
   }
+
+  const conversionProps: Record<string, unknown> = opts.includeConversionFields
+    ? {
+        converted_from: { type: "string", enum: [...CONVERSION_SOURCE_TYPES] },
+        ai_generated_options: { type: "boolean" },
+        source_question_number: { type: "string", nullable: true },
+      }
+    : {};
 
   const rowProps: Record<string, unknown> = {
     question_number: { type: "string" },
@@ -126,6 +160,7 @@ export function buildMcqResponseSchema(schema: Schema): ResponseSchema {
         required: ["ymin", "xmin", "ymax", "xmax", "explanation", "kind"],
       },
     },
+    ...conversionProps,
     ...customProps,
   };
 
@@ -140,6 +175,7 @@ export function buildMcqResponseSchema(schema: Schema): ResponseSchema {
     "confidence",
     "notes",
     "source_snippet",
+    ...(opts.includeConversionFields ? ["converted_from", "ai_generated_options"] : []),
     ...custom.filter((f) => f.required).map((f) => f.name),
   ];
 

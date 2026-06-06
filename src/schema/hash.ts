@@ -48,7 +48,9 @@ function canonicalizeField(field: FieldDefinition): CanonicalField {
   const out: CanonicalField = {
     name: field.name,
     type: field.type,
-    semantic_role: field.semantic_role,
+    // Always null: semantic roles were removed, but the field stays in the canonical form
+    // so existing schema hashes (and their cache keys) don't shift.
+    semantic_role: null,
     description: field.description,
     required: field.required,
   };

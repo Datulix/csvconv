@@ -107,4 +107,19 @@ export interface ExtractorPageInput {
   base64: string;
   mimeType?: string;
   has_images?: boolean;
+  /** Number of images the analyzer counted on this page — hints the extractor how many figure boxes to find. */
+  expected_image_count?: number;
+}
+
+/**
+ * Build the bracketed figure hint appended to a page label. Prefers the analyzer's exact
+ * count when available so the extractor knows precisely how many figure boxes to produce.
+ */
+export function pageImageHint(page: ExtractorPageInput): string {
+  if (typeof page.expected_image_count === "number" && page.expected_image_count > 0) {
+    const n = page.expected_image_count;
+    return ` [this page contains ${n} figure/image${n === 1 ? "" : "s"} — emit a bounding box for each]`;
+  }
+  if (page.has_images) return " [this page contains figures/images]";
+  return "";
 }

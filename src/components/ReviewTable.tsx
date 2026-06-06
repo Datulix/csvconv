@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as RMouseEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { loadRows, type SqliteRowRecord } from "../lib/sqliteCache";
-import { buildAuditJson, buildCsv, writeTextFile, type AuditExport } from "../lib/export";
+import { loadRows, listRuns, getRunPdfBase64, type SqliteRowRecord, type SqliteRunRecord } from "../lib/sqliteCache";
+import { buildAuditJson, buildCsv, projectRow, writeTextFile, type AuditExport } from "../lib/export";
 import { loadSchemas } from "../lib/schemaStorage";
+import { PRESETS } from "../schema/presets";
+import { schemaHash } from "../schema/hash";
 import type { Schema } from "../schema/types";
 import type { ExtractedRow } from "../pipelines/extractors/types";
 
@@ -19,7 +21,50 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
   const [filter, setFilter] = useState<Filter>("all");
   const [savedSchemas, setSavedSchemas] = useState<Schema[]>([]);
   const [selectedSchemaName, setSelectedSchemaName] = useState<string | null>(null);
+  const [runRecord, setRunRecord] = useState<SqliteRunRecord | null>(null);
+  const [hashMatchedSchema, setHashMatchedSchema] = useState<Schema | null>(null);
   const [activeLightbox, setActiveLightbox] = useState<{ path?: string; explanation: string; kind: string } | null>(null);
+
+  // Source-PDF preview panel beside the columns.
+  const [showPdf, setShowPdf] = useState(false);
+  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  const [pdfStatus, setPdfStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [pdfPage, setPdfPage] = useState(1);
+  const pdfFrameRef = useRef<HTMLIFrameElement>(null);
+
+  // Per-column widths (px) set by drag-resizing the header borders.
+  const [colWidths, setColWidths] = useState<Record<string, number>>({});
+  const [resizing, setResizing] = useState(false);
+
+  const startResize = useCallback((col: string, e: RMouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = (e.currentTarget as HTMLElement)
+      .closest("th")!
+      .getBoundingClientRect().width;
+    setResizing(true);
+    const onMove = (ev: globalThis.MouseEvent) => {
+      const newW = Math.max(40, startW + ev.clientX - startX);
+      setColWidths((prev) => ({ ...prev, [col]: newW }));
+    };
+    const onUp = () => {
+      setResizing(false);
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, []);
+
+  // The schema the run was executed with, recovered from the persisted run record.
+  const runSchema = useMemo<Schema | null>(() => {
+    if (!runRecord?.schema_json) return null;
+    try {
+      return JSON.parse(runRecord.schema_json) as Schema;
+    } catch {
+      return null;
+    }
+  }, [runRecord]);
 
   const hasFigures = useMemo(() => {
     return rows.some((r) => {
@@ -62,6 +107,91 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
     };
   }, [cacheKey]);
 
+  // Recover the run record (which now persists the schema used for the conversion).
+  // Reset the user's manual schema override whenever the run changes.
+  useEffect(() => {
+    setSelectedSchemaName(null);
+    setHashMatchedSchema(null);
+    if (!cacheKey) {
+      setRunRecord(null);
+      return;
+    }
+    let cancelled = false;
+    listRuns()
+      .then((runs) => {
+        if (!cancelled) setRunRecord(runs.find((r) => r.cache_key === cacheKey) ?? null);
+      })
+      .catch((err) => console.error("loading run record", err));
+    return () => {
+      cancelled = true;
+    };
+  }, [cacheKey]);
+
+  // Fallback for pre-migration runs that have a schema_hash but no stored schema_json:
+  // match the hash against built-in presets and saved schemas.
+  useEffect(() => {
+    const hash = runRecord?.schema_hash;
+    if (!hash || runSchema) {
+      setHashMatchedSchema(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const candidates = [...PRESETS.map((p) => p.schema), ...savedSchemas];
+      for (const candidate of candidates) {
+        if (cancelled) return;
+        if ((await schemaHash(candidate)) === hash) {
+          if (!cancelled) setHashMatchedSchema(candidate);
+          return;
+        }
+      }
+      if (!cancelled) setHashMatchedSchema(null);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [runRecord, runSchema, savedSchemas]);
+
+  // Load the source PDF as a blob URL the first time the panel is opened for a run.
+  // Re-fetched whenever the run changes; the object URL is revoked on cleanup.
+  useEffect(() => {
+    if (!showPdf || !cacheKey) return;
+    let cancelled = false;
+    let createdUrl: string | null = null;
+    setPdfStatus("loading");
+    getRunPdfBase64(cacheKey)
+      .then((b64) => {
+        if (cancelled) return;
+        const blob = base64ToBlob(b64, "application/pdf");
+        createdUrl = URL.createObjectURL(blob);
+        setPdfUrl(createdUrl);
+        setPdfStatus("ready");
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error("loading source pdf", err);
+        setPdfStatus("error");
+      });
+    return () => {
+      cancelled = true;
+      if (createdUrl) URL.revokeObjectURL(createdUrl);
+      setPdfUrl(null);
+      setPdfStatus("idle");
+    };
+  }, [showPdf, cacheKey]);
+
+  // Drive the iframe to the requested page. Setting .src (rather than just the
+  // attribute) forces the embedded viewer to navigate even on a fragment-only change.
+  useEffect(() => {
+    if (pdfStatus !== "ready" || !pdfUrl || !pdfFrameRef.current) return;
+    pdfFrameRef.current.src = `${pdfUrl}#page=${pdfPage}`;
+  }, [pdfUrl, pdfPage, pdfStatus]);
+
+  const openPdfAtPage = useCallback((page: number) => {
+    setPdfPage(page);
+    setShowPdf(true);
+  }, []);
+
   const filteredRows = useMemo(() => {
     if (filter === "all") return rows;
     return rows.filter((r) => {
@@ -72,15 +202,42 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
     });
   }, [rows, filter]);
 
-  const selectedSchema = useMemo(
-    () => savedSchemas.find((s) => s.name === selectedSchemaName) ?? null,
-    [savedSchemas, selectedSchemaName],
-  );
+  // Content type of this run, to scope which presets are offered as alternatives.
+  const runContentType = runSchema?.content_type ?? hashMatchedSchema?.content_type ?? runRecord?.content_type ?? null;
 
-  const columns = useMemo(() => deriveColumns(rows), [rows]);
+  // Schemas the user can switch the view/export to. The run's own schema comes first so it
+  // wins any name collision; then matching built-in presets, then saved schemas. De-duped by name.
+  const availableSchemas = useMemo<Schema[]>(() => {
+    const out: Schema[] = [];
+    const seen = new Set<string>();
+    const add = (s: Schema | null | undefined) => {
+      if (!s || seen.has(s.name)) return;
+      seen.add(s.name);
+      out.push(s);
+    };
+    add(runSchema);
+    add(hashMatchedSchema);
+    for (const p of PRESETS) if (!runContentType || p.schema.content_type === runContentType) add(p.schema);
+    for (const s of savedSchemas) add(s);
+    return out;
+  }, [runSchema, hashMatchedSchema, savedSchemas, runContentType]);
+
+  // The schema actually used to render the table and drive export. Explicit user choice wins;
+  // otherwise default to the run's persisted schema, then a hash match. Null → legacy raw view.
+  const activeSchema = useMemo<Schema | null>(() => {
+    const explicit = selectedSchemaName
+      ? availableSchemas.find((s) => s.name === selectedSchemaName) ?? null
+      : null;
+    return explicit ?? runSchema ?? hashMatchedSchema ?? null;
+  }, [selectedSchemaName, availableSchemas, runSchema, hashMatchedSchema]);
+
+  // Column headers: the preset's field names when a schema resolved, else inferred raw keys.
+  const schemaColumns = useMemo(() => (activeSchema ? activeSchema.fields.map((f) => f.name) : null), [activeSchema]);
+  const legacyColumns = useMemo(() => deriveColumns(rows), [rows]);
+  const columns = schemaColumns ?? legacyColumns;
 
   const handleExportCsv = useCallback(async () => {
-    const schema = selectedSchema ?? inferSchemaFromRows(rows);
+    const schema = activeSchema;
     if (!schema) {
       alert("Pick a schema for export (the run's original schema or any saved one).");
       return;
@@ -93,7 +250,7 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
     const extractedRows: ExtractedRow[] = rows.map((r) => r.canonical_json as ExtractedRow);
     const content = buildCsv(schema, extractedRows);
     await writeTextFile(path, content);
-  }, [rows, selectedSchema, cacheKey]);
+  }, [rows, activeSchema, cacheKey]);
 
   const handleExportAudit = useCallback(async () => {
     if (!cacheKey) return;
@@ -105,9 +262,9 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
     const extractedRows: ExtractedRow[] = rows.map((r) => r.canonical_json as ExtractedRow);
     const data: AuditExport = {
       generated_at: new Date().toISOString(),
-      schema_name: selectedSchema?.name ?? "(unknown)",
-      content_type: selectedSchema?.content_type ?? "(unknown)",
-      schema_hash: "(see run record)",
+      schema_name: activeSchema?.name ?? "(unknown)",
+      content_type: activeSchema?.content_type ?? runRecord?.content_type ?? "(unknown)",
+      schema_hash: runRecord?.schema_hash ?? "(see run record)",
       cache_key: cacheKey,
       mode: "(see run record)",
       confirmed_format: null,
@@ -127,7 +284,7 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
       rows: extractedRows,
     };
     await writeTextFile(path, buildAuditJson(data));
-  }, [rows, selectedSchema, cacheKey]);
+  }, [rows, activeSchema, runRecord, cacheKey]);
 
   if (!cacheKey) {
     return (
@@ -142,31 +299,43 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
   }
 
   return (
-    <div className="review-table">
+    <div className={`review-table${resizing ? " col-resizing" : ""}`}>
       <header className="review-header">
         <div>
           <h1>Review</h1>
           <p className="hint">
             Cache key: <code>{cacheKey.slice(0, 16)}…</code> · {rows.length} row
             {rows.length === 1 ? "" : "s"}
+            {activeSchema ? (
+              <> · preset: <strong>{activeSchema.name}</strong>{runSchema && activeSchema.name === runSchema.name ? " (run's preset)" : " (preview)"}</>
+            ) : null}
           </p>
         </div>
         <div className="review-actions">
           <select
-            value={selectedSchemaName ?? ""}
+            title="Preset used to project rows into columns — this is exactly what the CSV will contain."
+            value={activeSchema?.name ?? ""}
             onChange={(e) => setSelectedSchemaName(e.target.value || null)}
           >
-            <option value="">— pick export schema —</option>
-            {savedSchemas.map((s) => (
+            {availableSchemas.length === 0 ? <option value="">— no preset available —</option> : null}
+            {availableSchemas.map((s) => (
               <option key={s.name} value={s.name}>
                 {s.name} ({s.content_type})
+                {runSchema && s.name === runSchema.name ? " — run's preset" : ""}
               </option>
             ))}
           </select>
           <button
+            className={`btn-secondary ${showPdf ? "active" : ""}`}
+            onClick={() => setShowPdf((v) => !v)}
+            title="Show the original source PDF beside the columns"
+          >
+            {showPdf ? "Hide PDF" : "Show PDF"}
+          </button>
+          <button
             className="btn-secondary"
             onClick={handleExportCsv}
-            disabled={rows.length === 0 || !selectedSchema}
+            disabled={rows.length === 0 || !activeSchema}
           >
             Export CSV
           </button>
@@ -206,23 +375,56 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
         </div>
       ) : null}
 
+      <div className={`review-split ${showPdf ? "with-pdf" : ""}`}>
+        <div className="review-main-col">
       {filteredRows.length > 0 ? (
         <div className="review-table-wrap">
-          <table>
+          <table style={{ tableLayout: "fixed" }}>
+            <colgroup>
+              <col style={{ width: colWidths["__page"] ?? 52 }} />
+              <col style={{ width: colWidths["__idx"] ?? 42 }} />
+              {hasFigures ? <col style={{ width: colWidths["__figures"] ?? 100 }} /> : null}
+              {columns.map((c) => (
+                <col key={c} style={{ width: colWidths[c] ?? 150 }} />
+              ))}
+              <col style={{ width: colWidths["__flags"] ?? 120 }} />
+            </colgroup>
             <thead>
               <tr>
-                <th>page</th>
-                <th>row</th>
-                {hasFigures ? <th>figures</th> : null}
+                <th style={{ position: "relative" }}>
+                  <span className="th-label">page</span>
+                  <div className="col-resize-handle" onMouseDown={(e) => startResize("__page", e)} />
+                </th>
+                <th title="Row index within this page (0-based internal ordering)" style={{ position: "relative" }}>
+                  <span className="th-label">#</span>
+                  <div className="col-resize-handle" onMouseDown={(e) => startResize("__idx", e)} />
+                </th>
+                {hasFigures ? (
+                  <th style={{ position: "relative" }}>
+                    <span className="th-label">figures</span>
+                    <div className="col-resize-handle" onMouseDown={(e) => startResize("__figures", e)} />
+                  </th>
+                ) : null}
                 {columns.map((c) => (
-                  <th key={c}>{c}</th>
+                  <th key={c} style={{ position: "relative" }}>
+                    <span className="th-label">{c}</span>
+                    <div className="col-resize-handle" onMouseDown={(e) => startResize(c, e)} />
+                  </th>
                 ))}
-                <th>flags</th>
+                <th style={{ position: "relative" }}>
+                  <span className="th-label">flags</span>
+                  <div className="col-resize-handle" onMouseDown={(e) => startResize("__flags", e)} />
+                </th>
               </tr>
             </thead>
             <tbody>
               {filteredRows.map((r, i) => {
                 const row = r.canonical_json as Record<string, unknown>;
+                // When a schema is active, project the row exactly as the CSV export does so
+                // the table mirrors the picked preset's output. Otherwise show raw canonical keys.
+                const cellValues = activeSchema
+                  ? projectRow(activeSchema, row as ExtractedRow).map((c) => c.value)
+                  : columns.map((c) => row[c]);
                 return (
                   <tr
                     key={`${r.page_number}-${r.row_index_within_page}-${i}`}
@@ -234,7 +436,13 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
                         : ""
                     }
                   >
-                    <td>{r.page_number}</td>
+                    <td
+                      className="review-page-cell"
+                      title="Open this page in the PDF panel"
+                      onClick={() => openPdfAtPage(r.page_number)}
+                    >
+                      {r.page_number}
+                    </td>
                     <td>{r.row_index_within_page}</td>
                     {hasFigures ? (
                       <td>
@@ -271,8 +479,8 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
                         </div>
                       </td>
                     ) : null}
-                    {columns.map((c) => (
-                      <td key={c}>{formatCell(row[c])}</td>
+                    {columns.map((c, ci) => (
+                      <td key={c}>{formatCell(cellValues[ci])}</td>
                     ))}
                     <td>
                       {r.needs_review ? <span className="chip warn">needs review</span> : null}
@@ -280,6 +488,21 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
                         <span className="chip warn">ai uncertain</span>
                       ) : null}
                       {r.user_edited ? <span className="chip">edited</span> : null}
+                      {(row as Record<string, unknown>).converted_from ? (
+                        <span className="chip" title={`Converted from a ${String((row as Record<string, unknown>).converted_from)} question`}>
+                          converted
+                        </span>
+                      ) : null}
+                      {(row as Record<string, unknown>).duplicate_suspected ? (
+                        <span className="chip warn" title="This question shares its text with another question number — likely an extraction mix-up. Verify against the source.">
+                          duplicate?
+                        </span>
+                      ) : null}
+                      {(row as Record<string, unknown>).ai_generated ? (
+                        <span className="chip" title="Answer supplied by the AI (no answer was marked in the document). Verify it.">
+                          ai answer
+                        </span>
+                      ) : null}
                     </td>
                   </tr>
                 );
@@ -290,6 +513,24 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
       ) : rows.length > 0 ? (
         <p className="hint">No rows match the current filter.</p>
       ) : null}
+        </div>
+
+        {showPdf ? (
+          <aside className="review-pdf-panel">
+            <div className="review-pdf-bar">
+              <span>Source PDF{pdfStatus === "ready" ? ` · page ${pdfPage}` : ""}</span>
+              <button className="review-pdf-close" onClick={() => setShowPdf(false)} title="Hide PDF">×</button>
+            </div>
+            {pdfStatus === "loading" ? <p className="hint review-pdf-msg">Loading PDF…</p> : null}
+            {pdfStatus === "error" ? (
+              <p className="status error review-pdf-msg">
+                Source PDF unavailable — it may have been moved or deleted since this run.
+              </p>
+            ) : null}
+            <iframe ref={pdfFrameRef} title="Source PDF" className="review-pdf-frame" />
+          </aside>
+        ) : null}
+      </div>
 
       {activeLightbox ? (
         <div className="lightbox-overlay" onClick={() => setActiveLightbox(null)}>
@@ -307,6 +548,13 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
       ) : null}
     </div>
   );
+}
+
+function base64ToBlob(b64: string, type: string): Blob {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type });
 }
 
 function deriveColumns(rows: SqliteRowRecord[]): string[] {
@@ -359,8 +607,3 @@ function formatCell(value: unknown): string {
   return String(value);
 }
 
-function inferSchemaFromRows(_rows: SqliteRowRecord[]): Schema | null {
-  // Without metadata, we can't reconstruct the original schema reliably.
-  // The user is prompted to pick one explicitly via the dropdown.
-  return null;
-}

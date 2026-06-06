@@ -347,55 +347,6 @@ body {
   margin-bottom: 8px;
 }
 
-.content-type-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 10px;
-}
-
-.content-type-card {
-  display: block;
-  background: var(--bg-input);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  padding: 12px 14px;
-  cursor: pointer;
-  transition: border-color 0.1s, background 0.1s;
-}
-
-.content-type-card:hover {
-  border-color: var(--accent);
-}
-
-.content-type-card.selected {
-  border-color: var(--accent);
-  background: rgba(91, 157, 255, 0.08);
-}
-
-.content-type-card input[type="radio"] {
-  position: absolute;
-  opacity: 0;
-}
-
-.content-type-title {
-  font-weight: 600;
-  font-size: 13px;
-  margin-bottom: 4px;
-}
-
-.content-type-desc {
-  font-size: 12px;
-  color: var(--fg-muted);
-  line-height: 1.45;
-  margin-bottom: 8px;
-}
-
-.content-type-flags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
 .chip {
   display: inline-block;
   font-size: 10px;
@@ -431,10 +382,6 @@ body {
   border-color: var(--accent);
 }
 
-.preset-card.faded {
-  opacity: 0.7;
-}
-
 .preset-title {
   font-weight: 600;
   font-size: 13px;
@@ -452,16 +399,6 @@ body {
   display: flex;
   gap: 4px;
   flex-wrap: wrap;
-}
-
-.preset-other {
-  margin-top: 12px;
-}
-
-.preset-other summary {
-  cursor: pointer;
-  font-size: 12px;
-  color: var(--fg-muted);
 }
 
 .fields-header {
@@ -957,61 +894,143 @@ select {
   font-family: inherit;
 }
 
-/* Mode picker */
+/* Layered run-option toggles */
 
-.mode-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+.toggle-row {
+  display: flex;
   gap: 10px;
-}
-
-.mode-card {
-  display: block;
-  background: var(--bg-input);
+  align-items: flex-start;
+  padding: 12px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
-  padding: 14px 16px;
+  background: var(--bg-input);
   cursor: pointer;
-  transition: border-color 0.1s, background 0.1s;
-  position: relative;
+  margin-top: 10px;
 }
 
-.mode-card:hover:not(.disabled) {
+.toggle-row:hover:not(.disabled) {
   border-color: var(--accent);
 }
 
-.mode-card.selected {
+.toggle-row.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.toggle-row input[type="checkbox"] {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.toggle-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.toggle-desc {
+  font-size: 11px;
+  color: var(--fg-muted);
+  line-height: 1.5;
+}
+
+/* Schema output-focus selector */
+
+.focus-select-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.focus-option {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-input);
+  cursor: pointer;
+}
+
+.focus-option:hover {
+  border-color: var(--accent);
+}
+
+.focus-option.selected {
   border-color: var(--accent);
   background: rgba(91, 157, 255, 0.08);
 }
 
-.mode-card.disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.mode-card input[type="radio"] {
+.focus-option input[type="radio"] {
   position: absolute;
   opacity: 0;
 }
 
-.mode-title {
+.focus-option-label {
   font-weight: 600;
-  font-size: 14px;
-  margin-bottom: 4px;
+  font-size: 13px;
 }
 
-.mode-short {
-  font-size: 12px;
-  color: var(--fg);
-  line-height: 1.45;
-  margin-bottom: 8px;
-}
-
-.mode-desc {
+.focus-option-desc {
   font-size: 11px;
   color: var(--fg-muted);
+  line-height: 1.45;
+}
+
+/* Post-generation conversion card */
+
+.conversion-card {
+  border-color: var(--accent);
+}
+
+.conversion-row {
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-input);
+  margin-top: 8px;
+}
+
+.conversion-row-text {
+  font-size: 12px;
   line-height: 1.5;
+}
+
+.conversion-omit {
+  margin-top: 8px;
+}
+
+.conversion-controls {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.conversion-optcount {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.conversion-optcount input {
+  width: 70px;
+}
+
+.conversion-actions {
+  display: flex;
+  gap: 8px;
 }
 
 /* Cost panel */
@@ -1479,6 +1498,76 @@ select {
   border-radius: 999px;
 }
 
+.review-split {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.review-main-col {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.review-pdf-panel {
+  flex: 0 0 44%;
+  position: sticky;
+  top: 0;
+  align-self: flex-start;
+  height: calc(100vh - 180px);
+  min-height: 360px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: #525659;
+}
+
+.review-pdf-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+}
+
+.review-pdf-close {
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.review-pdf-msg {
+  padding: 8px 10px;
+  margin: 0;
+  background: var(--bg-elevated);
+}
+
+.review-pdf-frame {
+  flex: 1 1 auto;
+  width: 100%;
+  border: 0;
+  background: #525659;
+}
+
+.review-page-cell {
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.review-page-cell:hover {
+  text-decoration: underline;
+}
+
 .review-table-wrap {
   overflow-x: auto;
   border: 1px solid var(--border);
@@ -1486,7 +1575,7 @@ select {
 }
 
 .review-table-wrap table {
-  width: 100%;
+  min-width: 100%;
   border-collapse: collapse;
   font-size: 12px;
 }
@@ -1497,6 +1586,10 @@ select {
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);
   vertical-align: top;
+  /* max-width: 0 lets table-layout: fixed fully control column width;
+     without it the browser enforces a minimum based on cell content. */
+  max-width: 0;
+  overflow: hidden;
 }
 
 .review-table-wrap th {
@@ -1508,6 +1601,45 @@ select {
   color: var(--fg-muted);
   position: sticky;
   top: 0;
+  user-select: none;
+}
+
+.review-table-wrap td {
+  text-overflow: ellipsis;
+  white-space: normal;
+  word-break: break-word;
+}
+
+/* Header label — truncates with ellipsis, leaves room for the resize handle. */
+.th-label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-right: 8px;
+}
+
+/* Column resize drag handle — sits on the right edge of each <th>. */
+.col-resize-handle {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  cursor: col-resize;
+  z-index: 1;
+}
+.col-resize-handle:hover,
+.col-resize-handle:active {
+  background: var(--accent, #5b9dff);
+  opacity: 0.6;
+}
+
+/* Freeze cursor globally while a column is being dragged. */
+.col-resizing,
+.col-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 
 .row-needs-review {

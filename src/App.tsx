@@ -16,12 +16,16 @@ interface NavItem {
   icon: string;
 }
 
+// Dev-only tooling: visible under `tauri dev`, stripped from any production `vite build`
+// (which is what GitHub Actions runs to ship).
+const SHOW_DEBUG = import.meta.env.DEV;
+
 const NAV: NavItem[] = [
   { id: "convert", label: "New conversion", icon: "▶" },
   { id: "schemas", label: "Schemas", icon: "≡" },
   { id: "review", label: "Review", icon: "◐" },
   { id: "history", label: "History", icon: "↶" },
-  { id: "debug", label: "Debug", icon: "" },
+  ...(SHOW_DEBUG ? [{ id: "debug" as const, label: "Debug", icon: "" }] : []),
   { id: "settings", label: "Settings", icon: "⚙" },
 ];
 
@@ -67,7 +71,7 @@ function App() {
           ))}
         </nav>
         <div className="sidebar-footer">
-          <span className="version">v0.1.0 · dev</span>
+          <span className="version">v0.1.0{SHOW_DEBUG ? " · dev" : ""}</span>
         </div>
       </aside>
       <main className="main-content">
@@ -75,12 +79,12 @@ function App() {
           className="new-conversion-wrapper"
           style={{ display: view === "convert" ? "flex" : "none" }}
         >
-          <NewConversion onOpenInReview={openInReview} />
+          <NewConversion onOpenInReview={openInReview} active={view === "convert"} />
         </div>
         {view === "schemas" && <SchemaEditor />}
         {view === "review" && <ReviewTable cacheKey={reviewCacheKey} />}
         {view === "history" && <History onOpenRun={openInReview} />}
-        {view === "debug" && <PipelineDebugger />}
+        {SHOW_DEBUG && view === "debug" && <PipelineDebugger />}
         {view === "settings" && <Settings />}
       </main>
     </div>

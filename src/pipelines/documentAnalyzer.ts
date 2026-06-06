@@ -5,6 +5,14 @@ import { DOCUMENT_ANALYSIS_PROMPT } from "./prompts";
 import type { ExtractorPageInput } from "./extractors/types";
 import { ExamFormatSchema, EXAM_FORMATS } from "./detector";
 
+export const ImageRefSchema = z.object({
+  /** question_number the image belongs to, or null for page-level / decorative images. */
+  question_number: z.string().nullish(),
+  kind: z.enum(["figure", "diagram", "chart", "table", "illustration", "photo"]),
+  description: z.string(),
+});
+export type ImageRef = z.infer<typeof ImageRefSchema>;
+
 export const PageMapEntrySchema = z.object({
   page_number: z.number().int().min(1),
   content_type: z.enum(["questions", "answer_key", "instructions", "blank", "mixed"]),
@@ -15,7 +23,10 @@ export const PageMapEntrySchema = z.object({
   mcq_count: z.number().int().min(0).default(0),
   true_false_count: z.number().int().min(0).default(0),
   written_count: z.number().int().min(0).default(0),
+  matching_count: z.number().int().min(0).default(0),
   has_images: z.boolean().default(false),
+  image_count: z.number().int().min(0).default(0),
+  images: z.array(ImageRefSchema).default([]),
 });
 export type PageMapEntry = z.infer<typeof PageMapEntrySchema>;
 
@@ -37,9 +48,24 @@ export type CrossPageQuestion = z.infer<typeof CrossPageQuestionSchema>;
 export const ContentPatternSchema = z.object({
   question_range_start: z.number().int(),
   question_range_end: z.number().int(),
-  question_type: z.enum(["mcq", "true_false", "written", "fill_blank", "other"]),
+  question_type: z.enum(["mcq", "true_false", "written", "fill_blank", "matching", "other"]),
 });
 export type ContentPattern = z.infer<typeof ContentPatternSchema>;
+
+/**
+ * A contiguous range of questions sharing the same answer-marking method. A uniform
+ * document yields a single region spanning all questions; a mixed-format document
+ * (e.g. inline-marked Q1–20, answer-key-at-end Q21–40) yields one region per method.
+ * Drives per-region extractor routing in runPipeline.
+ */
+export const MarkingRegionSchema = z.object({
+  question_range_start: z.number().int(),
+  question_range_end: z.number().int(),
+  marking_format: ExamFormatSchema,
+  confidence: z.number().min(0).max(1),
+  notes: z.string().nullish(),
+});
+export type MarkingRegion = z.infer<typeof MarkingRegionSchema>;
 
 export const DocumentSectionSchema = z.object({
   label: z.string(),
@@ -52,10 +78,13 @@ export const DocumentAnalysisResultSchema = z.object({
   // Whole-document narrative
   document_summary: z.string(),
 
-  // Format classification (replaces standalone detector)
+  // Format classification (replaces standalone detector).
+  // Document-level fields describe the dominant marking method; marking_regions
+  // captures per-range methods for mixed-format documents.
   marking_format: ExamFormatSchema,
   marking_format_confidence: z.number().min(0).max(1),
   marking_format_notes: z.string(),
+  marking_regions: z.array(MarkingRegionSchema).default([]),
 
   // Question-type totals
   total_questions: z.number().int().nullable(),
@@ -94,6 +123,20 @@ const DOCUMENT_ANALYSIS_RESPONSE_SCHEMA: ResponseSchema = {
     },
     marking_format_confidence: { type: "number" },
     marking_format_notes: { type: "string" },
+    marking_regions: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          question_range_start: { type: "integer" },
+          question_range_end: { type: "integer" },
+          marking_format: { type: "string", enum: [...EXAM_FORMATS] },
+          confidence: { type: "number" },
+          notes: { type: "string" },
+        },
+        required: ["question_range_start", "question_range_end", "marking_format", "confidence"],
+      },
+    },
     total_questions: { type: "integer" },
     total_mcq_count: { type: "integer" },
     total_true_false_count: { type: "integer" },
@@ -128,9 +171,23 @@ const DOCUMENT_ANALYSIS_RESPONSE_SCHEMA: ResponseSchema = {
           mcq_count: { type: "integer" },
           true_false_count: { type: "integer" },
           written_count: { type: "integer" },
+          matching_count: { type: "integer" },
           has_images: { type: "boolean" },
+          image_count: { type: "integer" },
+          images: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                question_number: { type: "string" },
+                kind: { type: "string", enum: ["figure", "diagram", "chart", "table", "illustration", "photo"] },
+                description: { type: "string" },
+              },
+              required: ["kind", "description"],
+            },
+          },
         },
-        required: ["page_number", "content_type", "page_summary", "mcq_count", "true_false_count", "written_count", "has_images"],
+        required: ["page_number", "content_type", "page_summary", "mcq_count", "true_false_count", "written_count", "matching_count", "has_images", "image_count"],
       },
     },
     answer_key_locations: {
@@ -167,7 +224,7 @@ const DOCUMENT_ANALYSIS_RESPONSE_SCHEMA: ResponseSchema = {
           question_range_end: { type: "integer" },
           question_type: {
             type: "string",
-            enum: ["mcq", "true_false", "written", "fill_blank", "other"],
+            enum: ["mcq", "true_false", "written", "fill_blank", "matching", "other"],
           },
         },
         required: ["question_range_start", "question_range_end", "question_type"],
@@ -197,6 +254,7 @@ const DOCUMENT_ANALYSIS_RESPONSE_SCHEMA: ResponseSchema = {
     "marking_format",
     "marking_format_confidence",
     "marking_format_notes",
+    "marking_regions",
     "total_questions",
     "total_mcq_count",
     "total_true_false_count",
