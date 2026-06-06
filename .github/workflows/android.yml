@@ -66,9 +66,12 @@ jobs:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           NDK_HOME: ${{ env.NDK_HOME }}
 
+      - name: Find built APK
+        run: find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" | tee /tmp/apk-paths.txt
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: csvconv-android-arm64-debug
-          path: src-tauri/gen/android/app/build/outputs/apk/debug/app-debug.apk
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
