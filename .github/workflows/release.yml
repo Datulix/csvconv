@@ -92,8 +92,8 @@ jobs:
           mkdir -p src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a
           cp /tmp/pdfium-arm64/lib/libpdfium.so src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a/
 
-      - name: Build Android APK (release, arm64)
-        run: npm run tauri android build -- --apk --target aarch64
+      - name: Build Android APK (debug-signed, arm64)
+        run: npm run tauri android build -- --debug --apk --target aarch64
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           NDK_HOME: ${{ env.NDK_HOME }}
