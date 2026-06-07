@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { readFile, writeFile, mkdir, BaseDirectory } from "@tauri-apps/plugin-fs";
+import { appDataDir, join } from "@tauri-apps/api/path";
 import {
   loadSchemas,
   type SavedSchemaEntry,
@@ -165,13 +167,31 @@ export function NewConversion({ onOpenInReview, active }: NewConversionInjectedP
         filters: [{ name: "PDF", extensions: ["pdf"] }],
       });
       const path = typeof chosen === "string" ? chosen : null;
-      if (path) {
-        setPdfPath(path);
-        setPhase({ kind: "idle" });
-        setRunId(newRunId());
+      if (!path) return;
+
+      // Android's document picker returns an opaque content:// URI, which pdfium and
+      // std::fs can't open. Copy the bytes into app storage and use that real path.
+      // Desktop pickers already return a normal filesystem path — pass it straight through.
+      let usablePath = path;
+      if (path.startsWith("content://")) {
+        setPhase({ kind: "analyzing", message: "Importing PDF…" });
+        const bytes = await readFile(path);
+        await mkdir("imports", { baseDir: BaseDirectory.AppData, recursive: true });
+        const fileName = `import-${Date.now()}.pdf`;
+        await writeFile(`imports/${fileName}`, bytes, { baseDir: BaseDirectory.AppData });
+        const dir = await appDataDir();
+        usablePath = await join(dir, "imports", fileName);
       }
+
+      setPdfPath(usablePath);
+      setPhase({ kind: "idle" });
+      setRunId(newRunId());
     } catch (err) {
       console.error("file picker failed", err);
+      setPhase({
+        kind: "error",
+        message: `Couldn't open that PDF: ${err instanceof Error ? err.message : String(err)}`,
+      });
     }
   }, []);
 

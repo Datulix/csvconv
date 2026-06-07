@@ -140,6 +140,24 @@ body {
   position: relative;
   min-width: 0;
   background: var(--bg);
+  /* Clear the status bar / camera cutout on devices that draw under it.
+     env() is 0 on desktop, so this is a no-op there. */
+  padding-top: env(safe-area-inset-top);
+}
+
+/* Sidebar layout (tablet + desktop): the system bars overlap the chrome, so
+   pad the sidebar and the bottom of the content area. No-op on desktop. */
+@media (min-width: 641px) {
+  .sidebar {
+    padding-top: calc(16px + env(safe-area-inset-top));
+    padding-bottom: calc(16px + env(safe-area-inset-bottom));
+    padding-left: env(safe-area-inset-left);
+  }
+
+  .main-content {
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-right: env(safe-area-inset-right);
+  }
 }
 
 .settings {
@@ -3138,15 +3156,24 @@ button:disabled {
     display: none;
   }
 
-  /* Content fills space above the 60px bottom nav */
+  /* Content fills the space the bottom nav leaves; flexbox does the math.
+     padding-top clears the status bar / camera cutout, side padding clears
+     landscape notches. */
   .main-content {
-    height: calc(100dvh - 60px);
+    height: auto;
+    flex: 1;
+    min-height: 0;
+    padding-top: env(safe-area-inset-top);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
   }
 
-  /* Show bottom nav */
+  /* Show bottom nav. Extra bottom padding lifts the tap targets above the
+     system navigation bar (gesture pill / 3-button bar). */
   .bottom-nav {
     display: flex;
-    height: 60px;
+    height: calc(60px + env(safe-area-inset-bottom));
+    padding-bottom: env(safe-area-inset-bottom);
     flex-shrink: 0;
     background: #0b0d11;
     border-top: 1px solid var(--border);
