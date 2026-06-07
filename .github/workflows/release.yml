@@ -92,21 +92,39 @@ jobs:
           mkdir -p src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a
           cp /tmp/pdfium-arm64/lib/libpdfium.so src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a/
 
-      - name: Build Android APK (debug-signed, arm64)
-        run: npm run tauri android build -- --debug --apk --target aarch64
+      - name: Build Android APK (release, arm64)
+        run: npm run tauri android build -- --apk --target aarch64
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           NDK_HOME: ${{ env.NDK_HOME }}
 
-      - name: Find APK
-        run: find src-tauri/gen/android/app/build/outputs/apk -name "*.apk"
+      - name: Sign APK
+        run: |
+          # Generate a self-signed keystore (consistent password, throwaway cert)
+          keytool -genkey -v \
+            -keystore /tmp/release.keystore \
+            -alias csvconv \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass csvconv -keypass csvconv \
+            -dname "CN=csvconv, O=csvconv, C=US"
+
+          APK=$(find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" | head -1)
+          echo "Signing: $APK"
+
+          $ANDROID_HOME/build-tools/34.0.0/apksigner sign \
+            --ks /tmp/release.keystore \
+            --ks-alias csvconv \
+            --ks-pass pass:csvconv \
+            --key-pass pass:csvconv \
+            --out /tmp/csvconv-${{ needs.tag.outputs.new_tag }}.apk \
+            "$APK"
 
       - name: Upload APK to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.tag.outputs.new_tag }}
           name: ${{ needs.tag.outputs.new_tag }}
-          files: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          files: /tmp/csvconv-${{ needs.tag.outputs.new_tag }}.apk
 
   windows:
     name: Windows Installer (x64)
