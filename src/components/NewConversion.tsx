@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { readFile, writeFile, mkdir, BaseDirectory } from "@tauri-apps/plugin-fs";
 import { appDataDir, join } from "@tauri-apps/api/path";
@@ -63,11 +63,6 @@ export function NewConversion({ onOpenInReview, active }: NewConversionInjectedP
   const [savedSchemas, setSavedSchemas] = useState<SavedSchemaEntry[]>([]);
   const [selectedSchemaName, setSelectedSchemaName] = useState<string | null>(null);
   const [pdfPath, setPdfPath] = useState<string | null>(null);
-  // Layered run controls. Extraction always runs. Review adds an independent AI solve
-  // for confidence + disagreement flagging (default on). AI-authoritative makes the AI's
-  // answer the final one (override).
-  const [reviewEnabled, setReviewEnabled] = useState(true);
-  const [aiAuthoritative, setAiAuthoritative] = useState(false);
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   const [apiKeyPresent, setApiKeyPresent] = useState<boolean>(false);
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -99,6 +94,19 @@ export function NewConversion({ onOpenInReview, active }: NewConversionInjectedP
     message?: string;
     filledCount?: number;
   }>({ status: "idle" });
+  // Transient bottom-of-screen toast (e.g. why Start Analysis can't run yet).
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showToast = useCallback((message: string) => {
+    setToast(message);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 5000);
+  }, []);
+
+  useEffect(() => () => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -114,12 +122,21 @@ export function NewConversion({ onOpenInReview, active }: NewConversionInjectedP
   }, []);
 
   // This tab stays mounted across switches, so its mount-only load goes stale when the
-  // user adds a schema elsewhere. Re-fetch saved schemas each time the tab becomes active.
+  // user changes things elsewhere. Re-fetch schemas, the API key, and settings each time
+  // the tab becomes active — otherwise adding an API key in Settings leaves Start Analysis
+  // disabled until a full app restart.
   useEffect(() => {
     if (!active) return;
-    loadSchemas()
-      .then(setSavedSchemas)
-      .catch((err) => console.error("refreshing schemas failed", err));
+    (async () => {
+      try {
+        const [list, key, s] = await Promise.all([loadSchemas(), getApiKey(), loadSettings()]);
+        setSavedSchemas(list);
+        setApiKeyPresent(!!key && key.length > 0);
+        setSettings(s);
+      } catch (err) {
+        console.error("refreshing NewConversion on activate failed", err);
+      }
+    })();
   }, [active]);
 
   const selectedSchema = useMemo(
@@ -129,8 +146,13 @@ export function NewConversion({ onOpenInReview, active }: NewConversionInjectedP
 
   const contentType = selectedSchema?.content.content_type ?? null;
 
-  // Derive the pipeline's RunMode from the two layered toggles.
-  const mode: RunMode = aiAuthoritative ? "answer" : reviewEnabled ? "review" : "extract";
+  // Derive the pipeline's RunMode from the saved settings (configured in Settings →
+  // "AI review & answers"). Extraction always runs; review/answer layer on top.
+  const mode: RunMode = settings?.ai_authoritative
+    ? "answer"
+    : (settings?.ai_review_enabled ?? true)
+    ? "review"
+    : "extract";
 
   const effectiveAnalyzerModel: ModelId | null = useMemo(() => {
     if (!settings) return null;
@@ -296,6 +318,16 @@ export function NewConversion({ onOpenInReview, active }: NewConversionInjectedP
     contentType,
   ]);
 
+  // Tapping Start: if anything's missing, surface it as a toast (the preflight card
+  // can be scrolled off-screen on mobile) instead of silently doing nothing.
+  const handleStartClick = useCallback(() => {
+    if (preflight.length > 0) {
+      showToast(`Can't start yet — still need: ${preflight.join(", ")}.`);
+      return;
+    }
+    void handleStart();
+  }, [preflight, showToast, handleStart]);
+
   const handleConfirmFormat = useCallback(
     (format: ExamFormat, markingRegions: MarkingRegion[]) => {
       if (phase.kind !== "analyzed") return;
@@ -393,7 +425,7 @@ export function NewConversion({ onOpenInReview, active }: NewConversionInjectedP
             {pdfPath ? (
               <div className="file-row">
                 <span className="file-path" title={pdfPath}>
-                  {pdfPath}
+                  {pdfPath.replace(/\\/g, "/").split("/").pop() || pdfPath}
                 </span>
                 <button
                   className="btn-secondary small"
@@ -410,43 +442,18 @@ export function NewConversion({ onOpenInReview, active }: NewConversionInjectedP
             )}
           </section>
 
-          {/* Card: Run options */}
+          {/* Card: Run mode summary (configured in Settings → "AI review & answers") */}
           {contentType ? (
             <section className="card">
-              <label className="block-label">Run options</label>
+              <label className="block-label">Run mode</label>
               <p className="hint">
-                Extraction always runs — questions and any printed answers are read from the PDF.
+                {mode === "answer"
+                  ? "Extract + AI answers — the AI's answer overrides any printed mark."
+                  : mode === "review"
+                  ? "Extract + AI review — the AI independently solves each question and flags disagreements."
+                  : "Extract only — questions and any printed answers are read from the PDF."}
+                {" "}Change this in <strong>Settings → AI review &amp; answers</strong>.
               </p>
-              <label className={`toggle-row ${phase.kind !== "idle" ? "disabled" : ""}`}>
-                <input
-                  type="checkbox"
-                  checked={reviewEnabled || aiAuthoritative}
-                  disabled={aiAuthoritative || phase.kind !== "idle"}
-                  onChange={(e) => setReviewEnabled(e.target.checked)}
-                />
-                <div className="toggle-text">
-                  <div className="toggle-title">AI review for confidence</div>
-                  <div className="toggle-desc">
-                    The AI independently solves each question and compares to the printed answer,
-                    scoring confidence and flagging disagreements. Doubles solver cost.
-                  </div>
-                </div>
-              </label>
-              <label className={`toggle-row ${phase.kind !== "idle" ? "disabled" : ""}`}>
-                <input
-                  type="checkbox"
-                  checked={aiAuthoritative}
-                  disabled={phase.kind !== "idle"}
-                  onChange={(e) => setAiAuthoritative(e.target.checked)}
-                />
-                <div className="toggle-text">
-                  <div className="toggle-title">AI answers (override printed answers)</div>
-                  <div className="toggle-desc">
-                    The AI's answer becomes the final answer for every question, overriding any mark
-                    on the page. Use for unmarked practice exams or to regenerate an answer key.
-                  </div>
-                </div>
-              </label>
             </section>
           ) : null}
 
@@ -773,9 +780,9 @@ export function NewConversion({ onOpenInReview, active }: NewConversionInjectedP
                 The AI will scan the layout, detect the structure, and identify the question format.
               </p>
               <button
-                className="btn-primary big"
-                onClick={handleStart}
-                disabled={preflight.length > 0}
+                className={`btn-primary big${preflight.length > 0 ? " looks-disabled" : ""}`}
+                onClick={handleStartClick}
+                aria-disabled={preflight.length > 0}
               >
                 Start Analysis
               </button>
@@ -790,6 +797,12 @@ export function NewConversion({ onOpenInReview, active }: NewConversionInjectedP
           failure={failedPageDetail}
           onClose={() => setFailedPageDetail(null)}
         />
+      ) : null}
+
+      {toast ? (
+        <div className="toast" role="status" onClick={() => setToast(null)}>
+          {toast}
+        </div>
       ) : null}
     </div>
   );

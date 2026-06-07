@@ -37,6 +37,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": ["binaries/pdfium.dll"]
+    "resources": { "binaries/pdfium.dll": "pdfium.dll" }
   }
 }

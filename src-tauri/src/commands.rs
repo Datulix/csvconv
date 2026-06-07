@@ -21,14 +21,25 @@ fn make_pdfium() -> Result<Pdfium, String> {
 
     #[cfg(not(target_os = "android"))]
     {
-        // Resolve the DLL path relative to the running executable so it works in
-        // both dev (target/debug/) and production (installer dir).
-        let lib_path = std::env::current_exe()
+        // Look for pdfium.dll in the layouts it can land in: right next to the exe
+        // (dev `target/debug`, and production once bundled to the install root), plus
+        // the resource subfolders Tauri may place bundled resources in. First hit wins;
+        // bare "pdfium.dll" is the last-resort search-path fallback.
+        let exe_dir = std::env::current_exe()
             .ok()
-            .and_then(|p| p.parent().map(|d| d.join("pdfium.dll")))
-            .filter(|p| p.exists())
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "pdfium.dll".to_string());
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let mut lib_path = "pdfium.dll".to_string();
+        if let Some(dir) = exe_dir {
+            let candidates = [
+                dir.join("pdfium.dll"),
+                dir.join("binaries").join("pdfium.dll"),
+                dir.join("resources").join("pdfium.dll"),
+                dir.join("resources").join("binaries").join("pdfium.dll"),
+            ];
+            if let Some(found) = candidates.into_iter().find(|p| p.exists()) {
+                lib_path = found.to_string_lossy().into_owned();
+            }
+        }
 
         Pdfium::bind_to_library(lib_path)
             .map(Pdfium::new)

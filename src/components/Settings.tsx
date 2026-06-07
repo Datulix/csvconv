@@ -357,6 +357,48 @@ export function Settings() {
       </section>
 
       <section className="card">
+        <h2>AI review &amp; answers</h2>
+        <p className="hint">
+          Extraction always runs — questions and any printed answers are read from the PDF.
+          These control whether the AI also solves each question. Applied to every new run.
+        </p>
+        <div className="field">
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={settings.ai_review_enabled || settings.ai_authoritative}
+              disabled={settings.ai_authoritative}
+              onChange={(e) =>
+                setSettings((s) => ({ ...s, ai_review_enabled: e.target.checked }))
+              }
+            />
+            <span>AI review for confidence</span>
+          </label>
+          <p className="hint">
+            The AI independently solves each question and compares to the printed answer,
+            scoring confidence and flagging disagreements. Doubles solver cost.
+          </p>
+        </div>
+        <div className="field">
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={settings.ai_authoritative}
+              onChange={(e) =>
+                setSettings((s) => ({ ...s, ai_authoritative: e.target.checked }))
+              }
+            />
+            <span>AI answers (override printed answers)</span>
+          </label>
+          <p className="hint">
+            The AI's answer becomes the final answer for every question, overriding any mark
+            on the page. Use for unmarked practice exams or to regenerate an answer key. You
+            can also adopt AI answers per-row later in the Review tab.
+          </p>
+        </div>
+      </section>
+
+      <section className="card">
         <h2>Image export</h2>
         <p className="hint">
           Where your figure images will live after you upload them to your site. When you click{" "}

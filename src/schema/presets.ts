@@ -53,7 +53,7 @@ export const PRESETS: SchemaPreset[] = [
           name: "image_url",
           type: "string",
           description:
-            "URL of an associated image. Leave null — to be filled in after export if the question has a figure.",
+            'JSON array of associated image URLs, e.g. ["a.png","b.png","c.png"]. Leave null — to be filled in after export if the question has figures.',
           required: false,
         },
       ],

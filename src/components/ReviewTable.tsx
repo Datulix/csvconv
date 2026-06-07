@@ -304,15 +304,16 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
   const handleExportImages = useCallback(async () => {
     setImgExportMsg(null);
 
-    // Gather every valid figure path, and the per-row first-figure filename.
+    // Gather every valid figure path, and the per-row list of figure filenames
+    // (a question can have more than one figure).
     const figurePaths: string[] = [];
-    const rowFirstName = new Map<SqliteRowRecord, string>();
+    const rowNames = new Map<SqliteRowRecord, string[]>();
     for (const r of rows) {
       const row = r.canonical_json as Record<string, unknown>;
       const figs = ((row.figures as any[]) ?? []).filter((f) => f?.path && !f.crop_error);
       if (figs.length === 0) continue;
       for (const f of figs) figurePaths.push(f.path as string);
-      rowFirstName.set(r, basename(figs[0].path as string));
+      rowNames.set(r, figs.map((f) => basename(f.path as string)));
     }
 
     if (figurePaths.length === 0) {
@@ -332,15 +333,19 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
 
       // Fill the image-URL column (if the active schema has one) and persist.
       const urlField = findImageUrlField(activeSchema);
+      // Triviadox stores image_url as a JSON array so a question can carry
+      // multiple images; other url-ish columns keep a single string value.
+      const asJsonArray = urlField === "image_url";
       let filled = 0;
       if (urlField) {
         const base = imageBaseUrl?.trim() ?? "";
         const updated: SqliteRowRecord[] = [];
-        for (const [record, name] of rowFirstName) {
-          const url = base ? joinUrl(base, name) : name;
+        for (const [record, names] of rowNames) {
+          const urls = names.map((n) => (base ? joinUrl(base, n) : n));
+          const value = asJsonArray ? JSON.stringify(urls) : urls[0];
           const newCanonical = {
             ...(record.canonical_json as Record<string, unknown>),
-            [urlField]: url,
+            [urlField]: value,
           };
           updated.push({ ...record, canonical_json: newCanonical });
         }
@@ -371,6 +376,57 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
       setImgExporting(false);
     }
   }, [rows, activeSchema, imageBaseUrl]);
+
+  // Rows whose AI answer differs from the extracted answer (and so can be adopted).
+  const adoptableCount = useMemo(() => rows.filter(isAdoptable).length, [rows]);
+
+  // Replace the extracted answer with the AI's answer (a letter) on the given rows
+  // (skipping any that aren't adoptable), mark them user-edited, and persist. Triviadox
+  // stores the answer twice — `correct_answer` (letter) and `correct_index` (0-based) —
+  // as independently model-generated fields, so both must be kept in sync.
+  const adoptAiAnswers = useCallback(async (targets: SqliteRowRecord[]) => {
+    const updated: SqliteRowRecord[] = targets.filter(isAdoptable).map((r) => {
+      const row = r.canonical_json as Record<string, unknown>;
+      const aiLetter = String(row.ai_answer);
+      const next: Record<string, unknown> = { ...row, correct_answer: aiLetter };
+      // Mirror the letter into a 0-based index field if the schema uses one (Triviadox).
+      const idx = "ABCDE".indexOf(aiLetter);
+      if ("correct_index" in row && idx >= 0) next.correct_index = idx;
+      // Keep the compare fields internally consistent for export/audit.
+      if ("agreement" in row) next.agreement = true;
+      if ("disagreement_reason" in row) next.disagreement_reason = null;
+      return { ...r, canonical_json: next, user_edited: true };
+    });
+    if (updated.length === 0) return;
+    try {
+      await saveRows(updated);
+      setRows((prev) =>
+        prev.map((r) => {
+          const u = updated.find(
+            (x) =>
+              x.page_number === r.page_number &&
+              x.row_index_within_page === r.row_index_within_page,
+          );
+          return u ?? r;
+        }),
+      );
+    } catch (err) {
+      setError(`Failed to save answer change: ${String(err)}`);
+    }
+  }, []);
+
+  const handleAdoptAll = useCallback(() => {
+    if (adoptableCount === 0) return;
+    if (
+      !window.confirm(
+        `Replace the extracted answer with the AI's answer on ${adoptableCount} row${
+          adoptableCount === 1 ? "" : "s"
+        } where they differ? This overwrites the printed/extracted answer.`,
+      )
+    )
+      return;
+    void adoptAiAnswers(rows);
+  }, [adoptableCount, adoptAiAnswers, rows]);
 
   if (!cacheKey) {
     return (
@@ -433,6 +489,15 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
               title="Copy all figure images to a folder and fill the image-URL column"
             >
               {imgExporting ? "Exporting…" : "Export images"}
+            </button>
+          ) : null}
+          {adoptableCount > 0 ? (
+            <button
+              className="btn-secondary"
+              onClick={handleAdoptAll}
+              title="Replace the extracted answer with the AI's answer on every row where they differ"
+            >
+              Keep AI answers ({adoptableCount})
             </button>
           ) : null}
           <button
@@ -600,6 +665,15 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
                           ai answer
                         </span>
                       ) : null}
+                      {isAdoptable(r) ? (
+                        <button
+                          className="chip-button adopt-ai"
+                          title={`Extracted answer is ${String(row.correct_answer ?? "—")}; set it to the AI's answer (${String(row.ai_answer)})`}
+                          onClick={() => void adoptAiAnswers([r])}
+                        >
+                          use AI ({String(row.ai_answer)})
+                        </button>
+                      ) : null}
                     </td>
                   </tr>
                 );
@@ -671,6 +745,17 @@ function findImageUrlField(schema: Schema | null): string | null {
   const imageUrlish = names.find((n) => /url/i.test(n) && /(image|img|pic|photo)/i.test(n));
   if (imageUrlish) return imageUrlish;
   return names.find((n) => /url/i.test(n)) ?? null;
+}
+
+/**
+ * A row whose AI answer can be adopted: it has a non-empty `ai_answer` that differs
+ * from the current `correct_answer`. Agreements and AI-declined rows are no-ops.
+ */
+function isAdoptable(r: SqliteRowRecord): boolean {
+  const row = r.canonical_json as Record<string, unknown>;
+  const ai = row.ai_answer;
+  if (ai === null || ai === undefined || ai === "") return false;
+  return row.correct_answer !== ai;
 }
 
 function base64ToBlob(b64: string, type: string): Blob {

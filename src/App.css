@@ -752,6 +752,10 @@ body {
 
 .file-path {
   flex: 1;
+  /* Without this, a long unbreakable path keeps the flex item wider than its
+     container (min-width defaults to auto), so the ellipsis never triggers and
+     the path overflows the card — especially on narrow mobile screens. */
+  min-width: 0;
   background: var(--bg-input);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
@@ -786,6 +790,32 @@ body {
   to {
     transform: rotate(360deg);
   }
+}
+
+/* A primary button that can't act yet but stays tappable so a tap can explain why. */
+.btn-primary.looks-disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Transient bottom toast (mobile-friendly). Tap to dismiss; auto-dismisses too. */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  max-width: min(90vw, 480px);
+  z-index: 1000;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+  border: 1px solid var(--warning-border);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+  animation: fadeIn 0.15s ease-out;
 }
 
 .detector-readout {
@@ -1505,6 +1535,20 @@ select {
 .chip-button.active {
   background: rgba(91, 157, 255, 0.15);
   border-color: var(--accent);
+  color: var(--fg);
+}
+
+/* Per-row "adopt the AI answer" action in the flags column. */
+.chip-button.adopt-ai {
+  padding: 2px 8px;
+  font-size: 11px;
+  border-color: var(--accent);
+  color: var(--accent);
+  margin-top: 4px;
+}
+
+.chip-button.adopt-ai:hover {
+  background: rgba(91, 157, 255, 0.15);
   color: var(--fg);
 }
 

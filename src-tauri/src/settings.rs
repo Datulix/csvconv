@@ -21,6 +21,18 @@ pub struct AppSettings {
     /// column with `image_base_url + filename`. Missing in older settings files.
     #[serde(default)]
     pub image_base_url: Option<String>,
+    /// Run the AI review (independent solve + disagreement flagging) on every run.
+    /// Moved here from a per-run toggle. Missing in older settings files → default on.
+    #[serde(default = "default_true")]
+    pub ai_review_enabled: bool,
+    /// When true, the AI's answer overrides the printed/extracted answer for every
+    /// question. Off by default; the Review tab also lets you adopt AI answers later.
+    #[serde(default)]
+    pub ai_authoritative: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppSettings {
@@ -38,6 +50,8 @@ impl Default for AppSettings {
             confidence_threshold: 0.75,
             validator_enabled: true,
             image_base_url: None,
+            ai_review_enabled: true,
+            ai_authoritative: false,
         }
     }
 }

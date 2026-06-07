@@ -14,6 +14,9 @@ export interface AppSettings {
   confidence_threshold: number;
   validator_enabled: boolean;
   image_base_url: string | null;
+  // AI review/answer behavior, moved here from the per-run New Conversion toggles.
+  ai_review_enabled: boolean;
+  ai_authoritative: boolean;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -29,6 +32,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   confidence_threshold: 0.75,
   validator_enabled: true,
   image_base_url: null,
+  ai_review_enabled: true,
+  ai_authoritative: false,
 };
 
 export async function loadSettings(): Promise<AppSettings> {
