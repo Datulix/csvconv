@@ -118,3 +118,15 @@ export async function figuresDir(cacheKey: string): Promise<string> {
 export async function cleanupFigures(cacheKey: string): Promise<void> {
   await invoke("cleanup_figures", { cacheKey });
 }
+
+/**
+ * Copy figure crops into the device's public Downloads/<subdir>/ folder (via
+ * MediaStore on Android, ~/Downloads on desktop) so they're visible in the file
+ * manager and ready to upload. Returns how many files were written.
+ */
+export async function exportFiguresToDownloads(
+  figurePaths: string[],
+  subdir: string,
+): Promise<number> {
+  return invoke<number>("export_figures_to_downloads", { figurePaths, subdir });
+}

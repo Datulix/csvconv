@@ -38,6 +38,7 @@ pub fn run() {
             commands::figures_dir,
             commands::cleanup_figures,
             commands::export_figures,
+            commands::export_figures_to_downloads,
             commands::keychain_set_api_key,
             commands::keychain_get_api_key,
             commands::keychain_delete_api_key,

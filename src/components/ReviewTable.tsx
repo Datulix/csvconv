@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as RMouseEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { writeFile, mkdir, BaseDirectory } from "@tauri-apps/plugin-fs";
 import { loadRows, listRuns, getRunPdfBase64, saveRows, type SqliteRowRecord, type SqliteRunRecord } from "../lib/sqliteCache";
 import { buildAuditJson, buildCsv, projectRow, writeTextFile, type AuditExport } from "../lib/export";
-import { readImageAsBase64 } from "../lib/pdfApi";
+import { exportFiguresToDownloads } from "../lib/pdfApi";
 import { loadSchemas } from "../lib/schemaStorage";
 import { loadSettings } from "../lib/settings";
 import { PRESETS } from "../schema/presets";
@@ -257,7 +256,10 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
       return;
     }
     const path = await saveDialog({
-      defaultPath: `csvconv-${cacheKey?.slice(0, 8) ?? "export"}.csv`,
+      // Include a timestamp so the name is always unique: on Android the Downloads
+      // provider de-dupes a repeated name by appending "_1" to the *whole* string
+      // (→ "….csv_1"), which breaks the extension. A unique name avoids that.
+      defaultPath: `csvconv-${cacheKey?.slice(0, 8) ?? "export"}-${fileStamp()}.csv`,
       filters: [{ name: "CSV", extensions: ["csv"] }],
     });
     if (!path) return;
@@ -274,7 +276,7 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
   const handleExportAudit = useCallback(async () => {
     if (!cacheKey) return;
     const path = await saveDialog({
-      defaultPath: `csvconv-${cacheKey.slice(0, 8)}.audit.json`,
+      defaultPath: `csvconv-${cacheKey.slice(0, 8)}-${fileStamp()}.audit.json`,
       filters: [{ name: "JSON", extensions: ["json"] }],
     });
     if (!path) return;
@@ -310,14 +312,14 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
     }
   }, [rows, activeSchema, runRecord, cacheKey]);
 
-  // Write every figure crop into the phone's (or desktop's) Downloads folder, under a
-  // per-run subfolder, then fill the schema's image-URL column with `base + filename` so
-  // the exported CSV already points at where the images will live once uploaded.
+  // Write every figure crop into the device's public Downloads/<subfolder>/, then fill
+  // the schema's image-URL column with `base + filename` so the exported CSV already
+  // points at where the images will live once uploaded.
   //
-  // Goes through the fs plugin (not the std::fs `export_figures` command + a folder
-  // picker), because on Android the picker returns a `content://` URI that std::fs can't
-  // write to. `BaseDirectory.Download` is browser-accessible there for the later upload,
-  // and resolves to ~/Downloads on desktop — one code path for both.
+  // Goes through the native `export_figures_to_downloads` command (MediaStore on
+  // Android, ~/Downloads on desktop). The fs plugin's `BaseDirectory.Download` was
+  // tried first but on Android it lands in app-private external storage, which is
+  // invisible in the file manager — so the images couldn't be found or uploaded.
   const handleExportImages = useCallback(async () => {
     setImgExportMsg(null);
 
@@ -341,20 +343,9 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
     setImgExporting(true);
     try {
       const destSub = `csvconv-${cacheKey?.slice(0, 8) ?? "export"}`;
-      await mkdir(destSub, { baseDir: BaseDirectory.Download, recursive: true });
-
-      // Copy each unique crop (hash filenames are already unique) into the subfolder.
-      const seen = new Set<string>();
-      let copied = 0;
-      for (const p of figurePaths) {
-        const name = basename(p);
-        if (seen.has(name)) continue;
-        seen.add(name);
-        const b64 = await readImageAsBase64(p);
-        const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-        await writeFile(`${destSub}/${name}`, bytes, { baseDir: BaseDirectory.Download });
-        copied += 1;
-      }
+      // Native side reads the crops and writes them into public Downloads, skipping
+      // duplicate basenames (hashes are already unique) and missing files.
+      const copied = await exportFiguresToDownloads(figurePaths, destSub);
 
       // Fill the image-URL column (if the active schema has one) and persist.
       const urlField = findImageUrlField(activeSchema);
@@ -790,6 +781,13 @@ function basename(p: string): string {
   const norm = p.replace(/\\/g, "/");
   const idx = norm.lastIndexOf("/");
   return idx >= 0 ? norm.slice(idx + 1) : norm;
+}
+
+/** Compact local timestamp (`YYYYMMDD-HHMMSS`) for unique export filenames. */
+function fileStamp(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
 /** Join a base URL and a filename with exactly one slash between them. */

@@ -453,6 +453,221 @@ pub fn export_figures(figure_paths: Vec<String>, dest_dir: String) -> Result<Vec
     Ok(copied)
 }
 
+/// Save figure images into the device's **public** Downloads/<subdir>/ folder so
+/// the user can see and upload them from the phone's file manager.
+///
+/// Why this exists instead of the fs plugin: on Android `BaseDirectory.Download`
+/// resolves to the app's *private* external dir (`Android/data/<pkg>/files/Download`),
+/// which is invisible in the Files app and gallery — so "export images" produced
+/// files the user could never find. This writes through MediaStore, which (on API
+/// 29+) lets an app add entries to the public Downloads collection with **no storage
+/// permission**, because the app owns what it creates. On desktop it just copies into
+/// the OS Downloads folder. Returns the number of files written.
+///
+/// Source paths are the app-private figure crops, readable with std::fs on both
+/// platforms; duplicate basenames (hashes are already unique) and missing files are
+/// skipped rather than failing the whole export.
+#[tauri::command]
+pub fn export_figures_to_downloads(
+    app: AppHandle,
+    figure_paths: Vec<String>,
+    subdir: String,
+) -> Result<usize, String> {
+    let _ = &app;
+    let mut seen = std::collections::HashSet::new();
+
+    #[cfg(target_os = "android")]
+    {
+        let mut written = 0;
+        for src in &figure_paths {
+            let p = std::path::Path::new(src);
+            let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !seen.insert(name.to_string()) {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(p) else {
+                continue;
+            };
+            android_mediastore::write_to_downloads(&subdir, name, mime_for(name), &bytes)?;
+            written += 1;
+        }
+        Ok(written)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let downloads = app
+            .path()
+            .download_dir()
+            .map_err(|e| format!("could not resolve Downloads dir: {e}"))?;
+        let dest = downloads.join(&subdir);
+        std::fs::create_dir_all(&dest).map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
+        let mut written = 0;
+        for src in &figure_paths {
+            let p = std::path::Path::new(src);
+            let Some(name) = p.file_name() else {
+                continue;
+            };
+            if !seen.insert(name.to_owned()) {
+                continue;
+            }
+            if !p.exists() {
+                continue;
+            }
+            std::fs::copy(p, dest.join(name)).map_err(|e| format!("copy {src}: {e}"))?;
+            written += 1;
+        }
+        Ok(written)
+    }
+}
+
+#[cfg(target_os = "android")]
+fn mime_for(name: &str) -> &'static str {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".png") {
+        "image/png"
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else {
+        "application/octet-stream"
+    }
+}
+
+/// MediaStore writes via raw JNI. Kept in its own module so all the unsafe JNI glue
+/// is in one place. We never marshal the image bytes through JNI: instead we ask the
+/// ContentResolver for a writable file descriptor, detach it, and write the bytes in
+/// Rust — avoiding fragile byte-array conversions across the boundary.
+#[cfg(target_os = "android")]
+mod android_mediastore {
+    use jni::objects::{JObject, JValue};
+    use std::io::Write;
+    use std::os::fd::{FromRawFd, RawFd};
+
+    pub fn write_to_downloads(
+        subdir: &str,
+        filename: &str,
+        mime: &str,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        let ctx = ndk_context::android_context();
+        let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }
+            .map_err(|e| format!("jni: get JavaVM: {e}"))?;
+        let mut env = vm
+            .attach_current_thread()
+            .map_err(|e| format!("jni: attach thread: {e}"))?;
+        // SAFETY: ndk_context hands us the Android Context pointer set up by the runtime.
+        let context = unsafe { JObject::from_raw(ctx.context().cast()) };
+
+        let fd = match insert_and_open_fd(&mut env, &context, subdir, filename, mime) {
+            Ok(fd) => fd,
+            Err(e) => {
+                // Clear any pending Java exception so the next file's calls aren't poisoned.
+                let _ = env.exception_clear();
+                return Err(format!("MediaStore write failed for {filename}: {e}"));
+            }
+        };
+
+        // detachFd transferred ownership of the descriptor to us; File's Drop closes it,
+        // which is what makes the MediaStore entry final and visible.
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        file.write_all(bytes)
+            .map_err(|e| format!("write {filename} to Downloads: {e}"))?;
+        file.flush()
+            .map_err(|e| format!("flush {filename}: {e}"))?;
+        Ok(())
+    }
+
+    fn insert_and_open_fd(
+        env: &mut jni::JNIEnv,
+        context: &JObject,
+        subdir: &str,
+        filename: &str,
+        mime: &str,
+    ) -> Result<RawFd, jni::errors::Error> {
+        // ContentResolver resolver = context.getContentResolver();
+        let resolver = env
+            .call_method(
+                context,
+                "getContentResolver",
+                "()Landroid/content/ContentResolver;",
+                &[],
+            )?
+            .l()?;
+
+        // ContentValues values = new ContentValues(); values.put(...);
+        let values = env.new_object("android/content/ContentValues", "()V", &[])?;
+        put_string(env, &values, "_display_name", filename)?;
+        put_string(env, &values, "mime_type", mime)?;
+        put_string(env, &values, "relative_path", &format!("Download/{subdir}"))?;
+
+        // Uri collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI; (API 29+)
+        let collection = env
+            .get_static_field(
+                "android/provider/MediaStore$Downloads",
+                "EXTERNAL_CONTENT_URI",
+                "Landroid/net/Uri;",
+            )?
+            .l()?;
+
+        // Uri item = resolver.insert(collection, values);
+        let item = env
+            .call_method(
+                &resolver,
+                "insert",
+                "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;",
+                &[JValue::Object(&collection), JValue::Object(&values)],
+            )?
+            .l()?;
+        if item.is_null() {
+            return Err(jni::errors::Error::NullPtr("MediaStore.insert returned null"));
+        }
+
+        // ParcelFileDescriptor pfd = resolver.openFileDescriptor(item, "w");
+        let mode = env.new_string("w")?;
+        let mode_obj: &JObject = &mode;
+        let pfd = env
+            .call_method(
+                &resolver,
+                "openFileDescriptor",
+                "(Landroid/net/Uri;Ljava/lang/String;)Landroid/os/ParcelFileDescriptor;",
+                &[JValue::Object(&item), JValue::Object(mode_obj)],
+            )?
+            .l()?;
+        if pfd.is_null() {
+            return Err(jni::errors::Error::NullPtr(
+                "openFileDescriptor returned null",
+            ));
+        }
+
+        // int fd = pfd.detachFd();
+        let fd = env.call_method(&pfd, "detachFd", "()I", &[])?.i()?;
+        Ok(fd as RawFd)
+    }
+
+    fn put_string(
+        env: &mut jni::JNIEnv,
+        values: &JObject,
+        key: &str,
+        val: &str,
+    ) -> Result<(), jni::errors::Error> {
+        let k = env.new_string(key)?;
+        let v = env.new_string(val)?;
+        let k_obj: &JObject = &k;
+        let v_obj: &JObject = &v;
+        env.call_method(
+            values,
+            "put",
+            "(Ljava/lang/String;Ljava/lang/String;)V",
+            &[JValue::Object(k_obj), JValue::Object(v_obj)],
+        )?;
+        Ok(())
+    }
+}
+
 /// Copy a source PDF into the app's data dir (keyed by its sha256, so identical
 /// documents are stored once) and return the stored path. Lets the Review PDF
 /// panel keep working even if the user later moves or deletes the original.

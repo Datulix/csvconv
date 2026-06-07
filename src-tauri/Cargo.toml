@@ -36,3 +36,10 @@ thiserror = "1"
 [target.'cfg(not(target_os = "android"))'.dependencies]
 keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }
 
+# Android-only: raw JNI access so we can write figure images into the device's
+# public Downloads via MediaStore (the fs plugin's BaseDirectory.Download only
+# reaches app-private external storage, invisible in the file manager).
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
+
