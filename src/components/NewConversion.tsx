@@ -22,12 +22,6 @@ import {
 } from "../pipelines/detector";
 import { runDocumentAnalyzer, type DocumentAnalysisResult, type MarkingRegion } from "../pipelines/documentAnalyzer";
 import { type RunMode } from "../schema/contentTypes";
-import {
-  estimateCost,
-  formatCostRange,
-  formatCurrency,
-  type CostEstimate,
-} from "../lib/cost";
 import { runInlineMarkedExtractor } from "../pipelines/extractors/mcq_inlineMarked";
 import type { ExtractedBatch } from "../pipelines/extractors/types";
 import type { ExtractorPageInput } from "../pipelines/extractors/types";
@@ -168,19 +162,6 @@ export function NewConversion({ onOpenInReview, active }: NewConversionInjectedP
     return missing;
   }, [apiKeyPresent, settings, selectedSchema, pdfPath]);
 
-  const costEstimate: CostEstimate | null = useMemo(() => {
-    if (!settings || !contentType) return null;
-    const pageCount = phase.kind === "analyzed" ? phase.pageImages.length
-      : phase.kind === "ready_to_extract" ? phase.pageImages.length
-      : 0;
-    return estimateCost({
-      pageCount,
-      mode,
-      contentType,
-      settings,
-    });
-  }, [settings, contentType, mode, phase]);
-
   const handlePickFile = useCallback(async () => {
     try {
       const chosen = await openDialog({
@@ -283,6 +264,11 @@ export function NewConversion({ onOpenInReview, active }: NewConversionInjectedP
         modelId: effectiveAnalyzerModel,
         pages: pageImages,
         pdfName,
+        onProgress: (done, total) => {
+          // Long PDFs are analyzed in several batches; surface which one is running.
+          const suffix = total > 1 ? ` (batch ${Math.min(done + 1, total)}/${total})` : "";
+          setPhase({ kind: "analyzing", message: `Analyzing ${pageImages.length} pages with ${effectiveAnalyzerModel}…${suffix}` });
+        },
       });
       completePhase("analyze", analysis);
 
@@ -457,40 +443,6 @@ export function NewConversion({ onOpenInReview, active }: NewConversionInjectedP
             </section>
           ) : null}
 
-          {/* Card: Cost Estimate */}
-          {costEstimate && costEstimate.byStage.length > 0 ? (
-            <section className="card cost-panel">
-              <div className="cost-header">
-                <label className="block-label">Estimated cost</label>
-                <span className="cost-range">{formatCostRange(costEstimate)}</span>
-              </div>
-              {phase.kind === "analyzed" || phase.kind === "ready_to_extract" ? (
-                <p className="hint">
-                  Based on {phase.pageImages.length} pages, 4–12 questions per page (rough range).
-                  Real numbers land in the audit JSON after the run.
-                </p>
-              ) : (
-                <p className="hint">
-                  Pick a PDF and click <em>Start Analysis</em> to refine this estimate using the actual
-                  page count. Currently shows per-page rates only.
-                </p>
-              )}
-              <ul className="cost-breakdown">
-                {costEstimate.byStage.map((s) => (
-                  <li key={s.stage} className="cost-item">
-                    <div className="cost-item-main">
-                      <span className="cost-stage">{s.stage}</span>
-                      <span className="cost-amount">
-                        {s.low === s.high ? formatCurrency(s.low) : `${formatCurrency(s.low)} – ${formatCurrency(s.high)}`}
-                      </span>
-                      <span className="cost-model">{s.modelId ?? "—"}</span>
-                    </div>
-                    {s.notes ? <div className="cost-note">{s.notes}</div> : null}
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ) : null}
         </div>
 
         <div className="new-conversion-main">

@@ -1636,6 +1636,81 @@ select {
   border-radius: var(--radius);
 }
 
+/* Stacked-card view of rows — desktop hides it (the table is shown instead);
+   the phone media query swaps them. */
+.review-cards {
+  display: none;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.review-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  padding: 12px 14px;
+}
+
+.review-card.row-needs-review {
+  border-left: 3px solid var(--warning-fg);
+}
+
+.review-card.row-ai-needs-review {
+  border-left: 3px solid var(--accent);
+}
+
+.review-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.review-card-loc {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.review-card-fields {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.review-card-field {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 10px;
+  align-items: start;
+}
+
+.review-card-field dt {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-muted);
+  word-break: break-word;
+}
+
+.review-card-field dd {
+  margin: 0;
+  font-size: 13px;
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.review-card-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 12px;
+}
+
 .review-table-wrap table {
   min-width: 100%;
   border-collapse: collapse;
@@ -3347,6 +3422,21 @@ button:disabled {
 
   .review-split {
     display: block;
+  }
+
+  /* Swap the cramped table for the stacked-card view on phones. */
+  .review-table-wrap {
+    display: none;
+  }
+
+  .review-cards {
+    display: flex;
+  }
+
+  /* The PDF side-panel is hidden on phones, so the toggle would be a dead button
+     (and Android WebView can't render a PDF in an iframe anyway). */
+  .review-pdf-toggle {
+    display: none;
   }
 
   /* History header wrap */

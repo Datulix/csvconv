@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { writeTextFile as fsWriteTextFile } from "@tauri-apps/plugin-fs";
 import type { FieldDefinition, Schema } from "../schema/types";
 import type { ExtractedRow } from "../pipelines/extractors/types";
 
@@ -95,6 +95,13 @@ export function buildAuditJson(data: AuditExport): string {
   return JSON.stringify(data, null, 2);
 }
 
+/**
+ * Write text to a path chosen via the save dialog. Uses the fs plugin (not a custom
+ * std::fs command) so it works on Android too: there `save()` returns a `content://`
+ * URI that std::fs can't write to — which is why phone exports produced empty files —
+ * but the fs plugin writes through the Android content resolver. On desktop the path
+ * is a normal filesystem path and the dialog grants it write scope.
+ */
 export async function writeTextFile(path: string, content: string): Promise<void> {
-  await invoke("write_text_file", { path, content });
+  await fsWriteTextFile(path, content);
 }

@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as RMouseEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
-import { loadRows, listRuns, getRunPdfBase64, exportFigures, saveRows, type SqliteRowRecord, type SqliteRunRecord } from "../lib/sqliteCache";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { writeFile, mkdir, BaseDirectory } from "@tauri-apps/plugin-fs";
+import { loadRows, listRuns, getRunPdfBase64, saveRows, type SqliteRowRecord, type SqliteRunRecord } from "../lib/sqliteCache";
 import { buildAuditJson, buildCsv, projectRow, writeTextFile, type AuditExport } from "../lib/export";
+import { readImageAsBase64 } from "../lib/pdfApi";
 import { loadSchemas } from "../lib/schemaStorage";
 import { loadSettings } from "../lib/settings";
 import { PRESETS } from "../schema/presets";
@@ -259,9 +261,14 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
       filters: [{ name: "CSV", extensions: ["csv"] }],
     });
     if (!path) return;
-    const extractedRows: ExtractedRow[] = rows.map((r) => r.canonical_json as ExtractedRow);
-    const content = buildCsv(schema, extractedRows);
-    await writeTextFile(path, content);
+    try {
+      const extractedRows: ExtractedRow[] = rows.map((r) => r.canonical_json as ExtractedRow);
+      const content = buildCsv(schema, extractedRows);
+      await writeTextFile(path, content);
+      setImgExportMsg(`Exported ${extractedRows.length} row${extractedRows.length === 1 ? "" : "s"} to CSV.`);
+    } catch (err) {
+      setImgExportMsg(`CSV export failed: ${String(err)}`);
+    }
   }, [rows, activeSchema, cacheKey]);
 
   const handleExportAudit = useCallback(async () => {
@@ -295,12 +302,22 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
       answer_key: null,
       rows: extractedRows,
     };
-    await writeTextFile(path, buildAuditJson(data));
+    try {
+      await writeTextFile(path, buildAuditJson(data));
+      setImgExportMsg("Exported audit JSON.");
+    } catch (err) {
+      setImgExportMsg(`Audit JSON export failed: ${String(err)}`);
+    }
   }, [rows, activeSchema, runRecord, cacheKey]);
 
-  // Copy every figure crop out to a folder the user picks, then fill the schema's
-  // image-URL column with `base + filename` so the exported CSV already points at
-  // where the images will live once uploaded.
+  // Write every figure crop into the phone's (or desktop's) Downloads folder, under a
+  // per-run subfolder, then fill the schema's image-URL column with `base + filename` so
+  // the exported CSV already points at where the images will live once uploaded.
+  //
+  // Goes through the fs plugin (not the std::fs `export_figures` command + a folder
+  // picker), because on Android the picker returns a `content://` URI that std::fs can't
+  // write to. `BaseDirectory.Download` is browser-accessible there for the later upload,
+  // and resolves to ~/Downloads on desktop — one code path for both.
   const handleExportImages = useCallback(async () => {
     setImgExportMsg(null);
 
@@ -321,15 +338,23 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
       return;
     }
 
-    const destDir = await openDialog({
-      directory: true,
-      title: "Choose a folder to export images into",
-    });
-    if (!destDir || typeof destDir !== "string") return;
-
     setImgExporting(true);
     try {
-      const copied = await exportFigures(figurePaths, destDir);
+      const destSub = `csvconv-${cacheKey?.slice(0, 8) ?? "export"}`;
+      await mkdir(destSub, { baseDir: BaseDirectory.Download, recursive: true });
+
+      // Copy each unique crop (hash filenames are already unique) into the subfolder.
+      const seen = new Set<string>();
+      let copied = 0;
+      for (const p of figurePaths) {
+        const name = basename(p);
+        if (seen.has(name)) continue;
+        seen.add(name);
+        const b64 = await readImageAsBase64(p);
+        const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+        await writeFile(`${destSub}/${name}`, bytes, { baseDir: BaseDirectory.Download });
+        copied += 1;
+      }
 
       // Fill the image-URL column (if the active schema has one) and persist.
       const urlField = findImageUrlField(activeSchema);
@@ -363,7 +388,7 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
         filled = updated.length;
       }
 
-      const parts = [`Exported ${copied.length} image${copied.length === 1 ? "" : "s"} to ${destDir}.`];
+      const parts = [`Saved ${copied} image${copied === 1 ? "" : "s"} to Downloads/${destSub}/.`];
       if (urlField) {
         parts.push(`Filled "${urlField}" on ${filled} row${filled === 1 ? "" : "s"}.`);
       } else {
@@ -371,11 +396,11 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
       }
       setImgExportMsg(parts.join(" "));
     } catch (err) {
-      setImgExportMsg(`Export failed: ${String(err)}`);
+      setImgExportMsg(`Image export failed: ${String(err)}`);
     } finally {
       setImgExporting(false);
     }
-  }, [rows, activeSchema, imageBaseUrl]);
+  }, [rows, activeSchema, imageBaseUrl, cacheKey]);
 
   // Rows whose AI answer differs from the extracted answer (and so can be adopted).
   const adoptableCount = useMemo(() => rows.filter(isAdoptable).length, [rows]);
@@ -428,6 +453,67 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
     void adoptAiAnswers(rows);
   }, [adoptableCount, adoptAiAnswers, rows]);
 
+  // Figure thumbnails for a row — shared by the desktop table cell and the mobile card.
+  const renderFigures = (row: Record<string, unknown>) => (
+    <div className="figure-cell">
+      {((row.figures as any[]) ?? []).map((fig: any, fIdx: number) => {
+        if (fig.crop_error) {
+          return (
+            <div key={fIdx} className="figure-warning-icon" title={`Crop error: ${fig.crop_error}`}>
+              ⚠️
+            </div>
+          );
+        }
+        if (fig.path) {
+          return (
+            <div
+              key={fIdx}
+              className="figure-thumbnail-container"
+              onClick={() => setActiveLightbox(fig)}
+              title={`${fig.kind}: ${fig.explanation}`}
+            >
+              <img src={convertFileSrc(fig.path)} alt={fig.explanation} />
+            </div>
+          );
+        }
+        return null;
+      })}
+    </div>
+  );
+
+  // Flag chips + the per-row "use AI" action — shared by the table cell and the card.
+  const renderFlags = (r: SqliteRowRecord, row: Record<string, unknown>) => (
+    <>
+      {r.needs_review ? <span className="chip warn">needs review</span> : null}
+      {r.ai_needs_review ? <span className="chip warn">ai uncertain</span> : null}
+      {r.user_edited ? <span className="chip">edited</span> : null}
+      {row.converted_from ? (
+        <span className="chip" title={`Converted from a ${String(row.converted_from)} question`}>
+          converted
+        </span>
+      ) : null}
+      {row.duplicate_suspected ? (
+        <span className="chip warn" title="This question shares its text with another question number — likely an extraction mix-up. Verify against the source.">
+          duplicate?
+        </span>
+      ) : null}
+      {row.ai_generated ? (
+        <span className="chip" title="Answer supplied by the AI (no answer was marked in the document). Verify it.">
+          ai answer
+        </span>
+      ) : null}
+      {isAdoptable(r) ? (
+        <button
+          className="chip-button adopt-ai"
+          title={`Extracted answer is ${String(row.correct_answer ?? "—")}; set it to the AI's answer (${String(row.ai_answer)})`}
+          onClick={() => void adoptAiAnswers([r])}
+        >
+          use AI ({String(row.ai_answer)})
+        </button>
+      ) : null}
+    </>
+  );
+
   if (!cacheKey) {
     return (
       <div className="review-empty">
@@ -468,7 +554,7 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
             ))}
           </select>
           <button
-            className={`btn-secondary ${showPdf ? "active" : ""}`}
+            className={`btn-secondary review-pdf-toggle ${showPdf ? "active" : ""}`}
             onClick={() => setShowPdf((v) => !v)}
             title="Show the original source PDF beside the columns"
           >
@@ -486,7 +572,7 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
               className="btn-secondary"
               onClick={handleExportImages}
               disabled={rows.length === 0 || imgExporting}
-              title="Copy all figure images to a folder and fill the image-URL column"
+              title="Save all figure images into your Downloads folder and fill the image-URL column"
             >
               {imgExporting ? "Exporting…" : "Export images"}
             </button>
@@ -606,75 +692,11 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
                       {r.page_number}
                     </td>
                     <td>{r.row_index_within_page}</td>
-                    {hasFigures ? (
-                      <td>
-                        <div className="figure-cell">
-                          {((row.figures as any[]) ?? []).map((fig: any, fIdx: number) => {
-                            if (fig.crop_error) {
-                              return (
-                                <div
-                                  key={fIdx}
-                                  className="figure-warning-icon"
-                                  title={`Crop error: ${fig.crop_error}`}
-                                >
-                                  ⚠️
-                                </div>
-                              );
-                            }
-                            if (fig.path) {
-                              return (
-                                <div
-                                  key={fIdx}
-                                  className="figure-thumbnail-container"
-                                  onClick={() => setActiveLightbox(fig)}
-                                  title={`${fig.kind}: ${fig.explanation}`}
-                                >
-                                  <img
-                                    src={convertFileSrc(fig.path)}
-                                    alt={fig.explanation}
-                                  />
-                                </div>
-                              );
-                            }
-                            return null;
-                          })}
-                        </div>
-                      </td>
-                    ) : null}
+                    {hasFigures ? <td>{renderFigures(row)}</td> : null}
                     {columns.map((c, ci) => (
                       <td key={c}>{formatCell(cellValues[ci])}</td>
                     ))}
-                    <td>
-                      {r.needs_review ? <span className="chip warn">needs review</span> : null}
-                      {r.ai_needs_review ? (
-                        <span className="chip warn">ai uncertain</span>
-                      ) : null}
-                      {r.user_edited ? <span className="chip">edited</span> : null}
-                      {(row as Record<string, unknown>).converted_from ? (
-                        <span className="chip" title={`Converted from a ${String((row as Record<string, unknown>).converted_from)} question`}>
-                          converted
-                        </span>
-                      ) : null}
-                      {(row as Record<string, unknown>).duplicate_suspected ? (
-                        <span className="chip warn" title="This question shares its text with another question number — likely an extraction mix-up. Verify against the source.">
-                          duplicate?
-                        </span>
-                      ) : null}
-                      {(row as Record<string, unknown>).ai_generated ? (
-                        <span className="chip" title="Answer supplied by the AI (no answer was marked in the document). Verify it.">
-                          ai answer
-                        </span>
-                      ) : null}
-                      {isAdoptable(r) ? (
-                        <button
-                          className="chip-button adopt-ai"
-                          title={`Extracted answer is ${String(row.correct_answer ?? "—")}; set it to the AI's answer (${String(row.ai_answer)})`}
-                          onClick={() => void adoptAiAnswers([r])}
-                        >
-                          use AI ({String(row.ai_answer)})
-                        </button>
-                      ) : null}
-                    </td>
+                    <td>{renderFlags(r, row)}</td>
                   </tr>
                 );
               })}
@@ -683,6 +705,48 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
         </div>
       ) : rows.length > 0 ? (
         <p className="hint">No rows match the current filter.</p>
+      ) : null}
+
+      {/* Mobile-only stacked-card view of the same rows (the table is unreadable when
+          9 columns are crushed into a phone width). Toggled via CSS, not JS. */}
+      {filteredRows.length > 0 ? (
+        <div className="review-cards">
+          {filteredRows.map((r, i) => {
+            const row = r.canonical_json as Record<string, unknown>;
+            const fields = activeSchema
+              ? projectRow(activeSchema, row as ExtractedRow)
+              : columns.map((c) => ({ name: c, value: row[c] }));
+            const figs = (row.figures as any[]) ?? [];
+            return (
+              <div
+                key={`card-${r.page_number}-${r.row_index_within_page}-${i}`}
+                className={`review-card ${
+                  r.needs_review ? "row-needs-review" : r.ai_needs_review ? "row-ai-needs-review" : ""
+                }`}
+              >
+                <div className="review-card-head">
+                  <span
+                    className="review-card-loc review-page-cell"
+                    title="Open this page in the PDF panel"
+                    onClick={() => openPdfAtPage(r.page_number)}
+                  >
+                    page {r.page_number} · #{r.row_index_within_page}
+                  </span>
+                  {figs.length > 0 ? renderFigures(row) : null}
+                </div>
+                <dl className="review-card-fields">
+                  {fields.map((f) => (
+                    <div key={f.name} className="review-card-field">
+                      <dt>{f.name}</dt>
+                      <dd>{formatCell(f.value)}</dd>
+                    </div>
+                  ))}
+                </dl>
+                <div className="review-card-flags">{renderFlags(r, row)}</div>
+              </div>
+            );
+          })}
+        </div>
       ) : null}
         </div>
 
