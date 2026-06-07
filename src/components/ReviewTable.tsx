@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as RMouseEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { loadRows, listRuns, getRunPdfBase64, type SqliteRowRecord, type SqliteRunRecord } from "../lib/sqliteCache";
+import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
+import { loadRows, listRuns, getRunPdfBase64, exportFigures, saveRows, type SqliteRowRecord, type SqliteRunRecord } from "../lib/sqliteCache";
 import { buildAuditJson, buildCsv, projectRow, writeTextFile, type AuditExport } from "../lib/export";
 import { loadSchemas } from "../lib/schemaStorage";
+import { loadSettings } from "../lib/settings";
 import { PRESETS } from "../schema/presets";
 import { schemaHash } from "../schema/hash";
 import type { Schema } from "../schema/types";
@@ -35,6 +36,11 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
   // Per-column widths (px) set by drag-resizing the header borders.
   const [colWidths, setColWidths] = useState<Record<string, number>>({});
   const [resizing, setResizing] = useState(false);
+
+  // Image export: base URL from settings + a transient status line.
+  const [imageBaseUrl, setImageBaseUrl] = useState<string | null>(null);
+  const [imgExportMsg, setImgExportMsg] = useState<string | null>(null);
+  const [imgExporting, setImgExporting] = useState(false);
 
   const startResize = useCallback((col: string, e: RMouseEvent) => {
     e.preventDefault();
@@ -80,6 +86,12 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
         setSavedSchemas(list.map((s) => s.content));
       } catch (err) {
         console.error(err);
+      }
+      try {
+        const s = await loadSettings();
+        setImageBaseUrl(s.image_base_url ?? null);
+      } catch (err) {
+        console.error("loading settings for image base url", err);
       }
     })();
   }, []);
@@ -286,6 +298,80 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
     await writeTextFile(path, buildAuditJson(data));
   }, [rows, activeSchema, runRecord, cacheKey]);
 
+  // Copy every figure crop out to a folder the user picks, then fill the schema's
+  // image-URL column with `base + filename` so the exported CSV already points at
+  // where the images will live once uploaded.
+  const handleExportImages = useCallback(async () => {
+    setImgExportMsg(null);
+
+    // Gather every valid figure path, and the per-row first-figure filename.
+    const figurePaths: string[] = [];
+    const rowFirstName = new Map<SqliteRowRecord, string>();
+    for (const r of rows) {
+      const row = r.canonical_json as Record<string, unknown>;
+      const figs = ((row.figures as any[]) ?? []).filter((f) => f?.path && !f.crop_error);
+      if (figs.length === 0) continue;
+      for (const f of figs) figurePaths.push(f.path as string);
+      rowFirstName.set(r, basename(figs[0].path as string));
+    }
+
+    if (figurePaths.length === 0) {
+      setImgExportMsg("No figure images to export in this run.");
+      return;
+    }
+
+    const destDir = await openDialog({
+      directory: true,
+      title: "Choose a folder to export images into",
+    });
+    if (!destDir || typeof destDir !== "string") return;
+
+    setImgExporting(true);
+    try {
+      const copied = await exportFigures(figurePaths, destDir);
+
+      // Fill the image-URL column (if the active schema has one) and persist.
+      const urlField = findImageUrlField(activeSchema);
+      let filled = 0;
+      if (urlField) {
+        const base = imageBaseUrl?.trim() ?? "";
+        const updated: SqliteRowRecord[] = [];
+        for (const [record, name] of rowFirstName) {
+          const url = base ? joinUrl(base, name) : name;
+          const newCanonical = {
+            ...(record.canonical_json as Record<string, unknown>),
+            [urlField]: url,
+          };
+          updated.push({ ...record, canonical_json: newCanonical });
+        }
+        await saveRows(updated);
+        setRows((prev) =>
+          prev.map((r) => {
+            const u = updated.find(
+              (x) =>
+                x.page_number === r.page_number &&
+                x.row_index_within_page === r.row_index_within_page,
+            );
+            return u ?? r;
+          }),
+        );
+        filled = updated.length;
+      }
+
+      const parts = [`Exported ${copied.length} image${copied.length === 1 ? "" : "s"} to ${destDir}.`];
+      if (urlField) {
+        parts.push(`Filled "${urlField}" on ${filled} row${filled === 1 ? "" : "s"}.`);
+      } else {
+        parts.push(`No image-URL column in the active schema, so URLs were not written.`);
+      }
+      setImgExportMsg(parts.join(" "));
+    } catch (err) {
+      setImgExportMsg(`Export failed: ${String(err)}`);
+    } finally {
+      setImgExporting(false);
+    }
+  }, [rows, activeSchema, imageBaseUrl]);
+
   if (!cacheKey) {
     return (
       <div className="review-empty">
@@ -339,6 +425,16 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
           >
             Export CSV
           </button>
+          {hasFigures ? (
+            <button
+              className="btn-secondary"
+              onClick={handleExportImages}
+              disabled={rows.length === 0 || imgExporting}
+              title="Copy all figure images to a folder and fill the image-URL column"
+            >
+              {imgExporting ? "Exporting…" : "Export images"}
+            </button>
+          ) : null}
           <button
             className="btn-secondary"
             onClick={handleExportAudit}
@@ -348,6 +444,7 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
           </button>
         </div>
       </header>
+      {imgExportMsg ? <p className="status saved">{imgExportMsg}</p> : null}
 
       {loading ? <p className="hint">Loading rows…</p> : null}
       {error ? <p className="status error">{error}</p> : null}
@@ -548,6 +645,32 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
       ) : null}
     </div>
   );
+}
+
+/** Last path segment, handling both / and \ separators (figures use OS-native paths). */
+function basename(p: string): string {
+  const norm = p.replace(/\\/g, "/");
+  const idx = norm.lastIndexOf("/");
+  return idx >= 0 ? norm.slice(idx + 1) : norm;
+}
+
+/** Join a base URL and a filename with exactly one slash between them. */
+function joinUrl(base: string, name: string): string {
+  return base.endsWith("/") ? base + name : `${base}/${name}`;
+}
+
+/**
+ * Pick the schema field that should receive the image URL. Prefers an exact
+ * `image_url`, then any field whose name pairs "url" with an image-ish word,
+ * then any field containing "url". Returns null if the schema has no URL column.
+ */
+function findImageUrlField(schema: Schema | null): string | null {
+  if (!schema) return null;
+  const names = schema.fields.map((f) => f.name);
+  if (names.includes("image_url")) return "image_url";
+  const imageUrlish = names.find((n) => /url/i.test(n) && /(image|img|pic|photo)/i.test(n));
+  if (imageUrlish) return imageUrlish;
+  return names.find((n) => /url/i.test(n)) ?? null;
 }
 
 function base64ToBlob(b64: string, type: string): Blob {

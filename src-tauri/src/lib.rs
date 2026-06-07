@@ -36,6 +36,7 @@ pub fn run() {
             commands::crop_figures_batch,
             commands::figures_dir,
             commands::cleanup_figures,
+            commands::export_figures,
             commands::keychain_set_api_key,
             commands::keychain_get_api_key,
             commands::keychain_delete_api_key,

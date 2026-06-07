@@ -130,6 +130,11 @@ export async function getRunPdfBase64(cacheKey: string): Promise<string> {
   return invoke<string>("read_run_pdf_base64", { cacheKey });
 }
 
+/** Copy figure image files to a folder the user picked. Returns the names copied. */
+export async function exportFigures(figurePaths: string[], destDir: string): Promise<string[]> {
+  return invoke<string[]>("export_figures", { figurePaths, destDir });
+}
+
 export async function saveTrace(runId: string, traceJson: string): Promise<void> {
   await invoke("cache_save_trace", { runId, traceJson });
 }

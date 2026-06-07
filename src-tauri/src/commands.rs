@@ -418,6 +418,30 @@ pub fn cleanup_figures(app: AppHandle, cache_key: String) -> Result<(), String> 
     pdf::cleanup_figures(&app_data_dir(&app)?, &cache_key).map_err(|e| format!("{e:#}"))
 }
 
+/// Copy cropped figure images out to a user-chosen folder, keeping each file's
+/// original (hash) name. Returns the basenames actually copied so the UI can
+/// report a count. Missing/duplicate sources are skipped rather than failing the
+/// whole export.
+#[tauri::command]
+pub fn export_figures(figure_paths: Vec<String>, dest_dir: String) -> Result<Vec<String>, String> {
+    let dest = std::path::Path::new(&dest_dir);
+    std::fs::create_dir_all(dest).map_err(|e| format!("mkdir {dest_dir}: {e}"))?;
+    let mut copied = Vec::new();
+    for src in &figure_paths {
+        let src_path = std::path::Path::new(src);
+        let Some(name) = src_path.file_name() else {
+            continue;
+        };
+        if !src_path.exists() {
+            continue;
+        }
+        let dest_path = dest.join(name);
+        std::fs::copy(src_path, &dest_path).map_err(|e| format!("copy {src}: {e}"))?;
+        copied.push(name.to_string_lossy().into_owned());
+    }
+    Ok(copied)
+}
+
 /// Copy a source PDF into the app's data dir (keyed by its sha256, so identical
 /// documents are stored once) and return the stored path. Lets the Review PDF
 /// panel keep working even if the user later moves or deletes the original.

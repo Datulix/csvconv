@@ -16,6 +16,11 @@ pub struct AppSettings {
     pub parallel_batches: u32,
     pub confidence_threshold: f32,
     pub validator_enabled: bool,
+    /// Base URL where exported figure images will be hosted after the user uploads
+    /// them to their site. The "Export images" step fills the schema's image-url
+    /// column with `image_base_url + filename`. Missing in older settings files.
+    #[serde(default)]
+    pub image_base_url: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -32,6 +37,7 @@ impl Default for AppSettings {
             parallel_batches: 3,
             confidence_threshold: 0.75,
             validator_enabled: true,
+            image_base_url: None,
         }
     }
 }

@@ -13,6 +13,7 @@ export interface AppSettings {
   parallel_batches: number;
   confidence_threshold: number;
   validator_enabled: boolean;
+  image_base_url: string | null;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -27,6 +28,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   parallel_batches: 3,
   confidence_threshold: 0.75,
   validator_enabled: true,
+  image_base_url: null,
 };
 
 export async function loadSettings(): Promise<AppSettings> {

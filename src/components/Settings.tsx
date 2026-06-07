@@ -356,6 +356,34 @@ export function Settings() {
         </div>
       </section>
 
+      <section className="card">
+        <h2>Image export</h2>
+        <p className="hint">
+          Where your figure images will live after you upload them to your site. When you click{" "}
+          <strong>Export images</strong> in Review, each row's image-URL column is auto-filled with
+          this base joined to the image's filename.
+        </p>
+        <div className="field">
+          <label htmlFor="image-base-url">Image base URL</label>
+          <input
+            id="image-base-url"
+            type="text"
+            value={settings.image_base_url ?? ""}
+            onChange={(e) =>
+              setSettings((s) => ({ ...s, image_base_url: e.target.value || null }))
+            }
+            placeholder="https://cdn.yoursite.com/images/"
+            spellCheck={false}
+            autoComplete="off"
+          />
+          <p className="hint">
+            e.g. <code>https://cdn.yoursite.com/images/</code> → URL becomes{" "}
+            <code>…/images/&lt;filename&gt;.jpg</code>. Leave blank to fill the column with just the
+            filename.
+          </p>
+        </div>
+      </section>
+
       <div className="actions">
         <button
           className="btn-primary big"
