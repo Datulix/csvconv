@@ -87,6 +87,20 @@ function App() {
         {SHOW_DEBUG && view === "debug" && <PipelineDebugger />}
         {view === "settings" && <Settings />}
       </main>
+      {/* Bottom navigation — hidden on desktop via CSS, shown on mobile */}
+      <nav className="bottom-nav">
+        {NAV.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            className={`bottom-nav-item ${view === item.id ? "active" : ""}`}
+            onClick={() => setView(item.id)}
+          >
+            <span className="bottom-nav-icon">{item.icon}</span>
+            <span>{item.label}</span>
+          </button>
+        ))}
+      </nav>
     </div>
   );
 }
