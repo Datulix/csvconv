@@ -474,7 +474,9 @@ pub fn export_figures_to_downloads(
     subdir: String,
 ) -> Result<usize, String> {
     let _ = &app;
-    let mut seen = std::collections::HashSet::new();
+    // Explicit element type: on Android the only `insert` (which would otherwise infer it) is
+    // cfg'd out, so without this the aarch64-linux-android build fails to infer `T`.
+    let mut seen: std::collections::HashSet<std::ffi::OsString> = std::collections::HashSet::new();
 
     #[cfg(target_os = "android")]
     {
