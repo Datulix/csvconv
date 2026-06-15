@@ -39,11 +39,13 @@ import { runValidator, VALIDATOR_CONFIDENCE_THRESHOLD, type McqExtractorVariant 
 import {
   indexSolverResults,
   planSolverBatches,
+  rowSolverUid,
   runSolverBatch,
+  setRowSolverUid,
   type SolverPageImage,
   type SolverQuestion,
 } from "./solver";
-import { compareAll, type ComparedRow } from "./compare";
+import { compareAll, flagMisalignedSections, type ComparedRow } from "./compare";
 import {
   startTrace,
   beginPhase,
@@ -633,7 +635,7 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
           (qn) => inAnswerKeyRegion(qn),
         );
         merged = patched.batch;
-        completePhase("answer_key", { entries: answerKey.entries });
+        completePhase("answer_key", { entries: answerKey.entries, patch: patched.summary });
       } else {
         completePhase("answer_key", { note: "No key images found" });
       }
@@ -658,13 +660,18 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
       const allRows: ExtractedRow[] = [];
       const solverQuestions: SolverQuestion[] = [];
       for (const page of merged.pages) {
-        for (const row of page.rows) {
+        page.rows.forEach((row, rIdx) => {
+          // Stable, globally-unique join key. Matches the (page_number, row_index_within_page)
+          // identity used when persisting, and — unlike question_number — is unique even when a
+          // multi-section exam restarts numbering at 1 in each section.
+          const uid = `${page.page_number}:${rIdx}`;
+          setRowSolverUid(row, uid);
           if (row.question_number == null) {
-            row.question_number = `p${page.page_number}_r${page.rows.indexOf(row)}`;
+            row.question_number = `p${page.page_number}_r${rIdx}`;
           }
           allRows.push(row);
           const stemImg = pageImageByNumber.get(page.page_number);
-          if (!stemImg) continue;
+          if (!stemImg) return;
           const images: SolverPageImage[] = [
             { pageNumber: stemImg.pageNumber, base64: stemImg.base64, mimeType: "image/jpeg" },
           ];
@@ -674,8 +681,8 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
               images.push({ pageNumber: cont.pageNumber, base64: cont.base64, mimeType: "image/jpeg" });
             }
           }
-          solverQuestions.push({ row, pageImages: images });
-        }
+          solverQuestions.push({ uid, row, pageImages: images });
+        });
       }
 
       const solverBatches = planSolverBatches(solverQuestions);
@@ -712,11 +719,20 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
         const result = compareAll(allRows, solverMap);
         comparedRows = result.rows;
         compareSummary = result.summary;
-        completePhase("compare", { summary: compareSummary, rows: comparedRows });
+        // Backstop: flag any section whose marked answers agree with the independent AI far
+        // less than the rest of the exam — a strong signal the answer key was mapped to the
+        // wrong section (e.g. an unlabeled multi-section key whose sections were out of order).
+        const sectionAgreement = flagMisalignedSections(comparedRows);
+        const suspectSections = sectionAgreement.filter((s) => s.suspect);
+        if (suspectSections.length > 0) {
+          console.warn(`[compare] ${suspectSections.length} section(s) flagged as possible answer-key misalignment`, suspectSections);
+        }
+        completePhase("compare", { summary: compareSummary, rows: comparedRows, sectionAgreement });
       } else {
         skipPhase("compare", "Compare", "system", `Mode is ${mode} — Compare only runs in review mode`);
         comparedRows = allRows.map((row) => {
-          const solved = solverMap.get(String(row.question_number ?? ""));
+          const uid = rowSolverUid(row);
+          const solved = uid != null ? solverMap.get(uid) : undefined;
           if (solved) {
             return {
               ...row,
@@ -881,11 +897,19 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
     // 11. Persist all rows to cache for the Review UI
     reportProgress(onProgress, { stage: "persist", message: "Saving rows to cache…" });
     let totalRows = 0;
+    // Index compared rows by their solver uid so each page row picks up ITS OWN AI result.
+    // Matching on question_number here would collapse multi-section duplicates (every "Q1"
+    // would grab the first compared "Q1"), so always join on the unique uid.
+    const comparedByUid = new Map<string, ComparedRow>();
+    for (const r of comparedRows ?? []) {
+      const uid = rowSolverUid(r);
+      if (uid != null) comparedByUid.set(uid, r);
+    }
     const finalPages = merged.pages.map((page) => {
       const enrichedRows = page.rows.map((row) => {
         if (comparedRows) {
-          const qn = String(row.question_number ?? "");
-          const found = comparedRows.find((r) => String(r.question_number ?? "") === qn);
+          const uid = rowSolverUid(row);
+          const found = uid != null ? comparedByUid.get(uid) : undefined;
           return found ?? row;
         }
         return row;
@@ -909,7 +933,9 @@ export async function runPipeline(args: RunPipelineArgs): Promise<PipelineResult
         const needs_review =
           isDuplicate ||
           (typeof row.confidence === "number" && row.confidence < VALIDATOR_CONFIDENCE_THRESHOLD) ||
-          (row as Record<string, unknown>).image_count_mismatch === true;
+          (row as Record<string, unknown>).image_count_mismatch === true ||
+          (row as Record<string, unknown>).answer_key_unresolved === true ||
+          (row as Record<string, unknown>).answer_key_section_suspect === true;
         const ai_needs_review =
           typeof (row as ComparedRow).ai_confidence === "number" &&
           (row as ComparedRow).ai_confidence! < VALIDATOR_CONFIDENCE_THRESHOLD &&

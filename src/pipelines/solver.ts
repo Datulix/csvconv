@@ -30,7 +30,9 @@ Rules:
 - Your explanation should be 1-3 sentences focused on WHY your answer is correct
   and (briefly) why the strongest distractor is wrong.
 
-Return per question: { question_number, ai_answer, ai_explanation, ai_confidence }.
+Return per question: { uid, question_number, ai_answer, ai_explanation, ai_confidence }.
+Echo back the \`uid\` EXACTLY as it was given for each question — it is how your
+answer is matched to the right question, so it must be copied verbatim.
 The page image(s) shown for each question may be referenced by your reasoning.`;
 
 /** Same resilience as CorrectAnswerSchema — normalize "" / undefined → null. */
@@ -40,6 +42,8 @@ const AiAnswerSchema = z.preprocess(
 );
 
 export const SolvedQuestionSchema = z.object({
+  /** Opaque join key echoed back by the model; correlates the answer to its input row. */
+  uid: z.string(),
   question_number: z.string(),
   ai_answer: AiAnswerSchema,
   ai_explanation: z.string(),
@@ -60,12 +64,13 @@ const SOLVER_RESPONSE_SCHEMA: ResponseSchema = {
       items: {
         type: "object",
         properties: {
+          uid: { type: "string" },
           question_number: { type: "string" },
           ai_answer: { type: "string", enum: [...OPTION_LETTERS], nullable: true },
           ai_explanation: { type: "string" },
           ai_confidence: { type: "number" },
         },
-        required: ["question_number", "ai_answer", "ai_explanation", "ai_confidence"],
+        required: ["uid", "question_number", "ai_answer", "ai_explanation", "ai_confidence"],
       },
     },
   },
@@ -81,6 +86,12 @@ export interface SolverPageImage {
 
 /** A question to be solved, with the page image(s) the model should see. */
 export interface SolverQuestion {
+  /**
+   * Stable, globally-unique join key for this row (e.g. `page:rowIndex`). Question
+   * numbers are NOT unique across multi-section exams (every section may restart at 1),
+   * so the answer is correlated back to its row by this uid, never by question_number.
+   */
+  uid: string;
   /** The extracted row (we read question_text + options off this). */
   row: ExtractedRow;
   /** Page image(s) backing this question (typically 1, sometimes 2 for is_partial). */
@@ -115,7 +126,7 @@ function buildSolverParts(questions: SolverQuestion[]): ContentPart[] {
 
     parts.push({
       kind: "text",
-      text: `QUESTION ${idx + 1} (from PAGE${q.pageImages.length > 1 ? "S" : ""} ${pageList}${partialNote}):\n  question_number: ${row.question_number}\n  ${row.question_text}\n\nOptions:\n${optionLines}`,
+      text: `QUESTION ${idx + 1} (uid: ${q.uid}) (from PAGE${q.pageImages.length > 1 ? "S" : ""} ${pageList}${partialNote}):\n  uid: ${q.uid}\n  question_number: ${row.question_number}\n  ${row.question_text}\n\nOptions:\n${optionLines}`,
     });
     for (const img of q.pageImages) {
       parts.push({
@@ -188,14 +199,29 @@ export function planSolverBatches(
   return batches;
 }
 
-/** Convenience: a single solved answer keyed by question_number. */
+/**
+ * Property under which a row's solver join uid is stashed. It is internal pipeline
+ * plumbing, not a schema field, so it never appears in the exported CSV (export projects
+ * only schema fields). Stable across solve → compare → persist for the same row object.
+ */
+export const SOLVER_UID_KEY = "__solver_uid";
+
+export function rowSolverUid(row: ExtractedRow): string | undefined {
+  return (row as Record<string, unknown>)[SOLVER_UID_KEY] as string | undefined;
+}
+
+export function setRowSolverUid(row: ExtractedRow, uid: string): void {
+  (row as Record<string, unknown>)[SOLVER_UID_KEY] = uid;
+}
+
+/** Convenience: a single solved answer keyed by the question's `uid` (NOT question_number). */
 export type SolverAnswerMap = Map<string, SolvedQuestion>;
 
 export function indexSolverResults(responses: SolverBatchResponse[]): SolverAnswerMap {
   const out: SolverAnswerMap = new Map();
   for (const resp of responses) {
     for (const q of resp.questions) {
-      out.set(q.question_number, q);
+      out.set(q.uid, q);
     }
   }
   return out;

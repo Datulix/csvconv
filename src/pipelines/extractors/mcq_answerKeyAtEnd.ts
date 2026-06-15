@@ -15,6 +15,7 @@ import {
 } from "./schemaBuilders";
 import { pageImageHint, type ExtractedBatch, type ExtractorPageInput, type OptionLetter } from "./types";
 import type { PageMapEntry } from "../documentAnalyzer";
+import { parseQuestionNumber, segmentNumberingRuns } from "../sections";
 
 /**
  * Two-phase MCQ extractor for answer_key_at_end format.
@@ -172,6 +173,11 @@ export interface PatchSummary {
   matched: number;
   unmatchedBodyRows: Array<{ page_number: number; question_number: string }>;
   unmatchedKeyEntries: AnswerKeyEntry[];
+  /** Which matching strategy was used — recorded in the phase trace for diagnosis. */
+  strategy: "section-paired" | "section-label" | "bare-number-with-flags" | "single-section";
+  has_sections: boolean;
+  body_run_lengths: number[];
+  key_run_lengths: number[];
 }
 
 function compoundKey(section: string | null | undefined, qn: string): string {
@@ -207,50 +213,147 @@ export function patchWithAnswerKey(
   let matched = 0;
   const unmatchedBodyRows: Array<{ page_number: number; question_number: string }> = [];
 
-  for (const page of body.pages) {
+  const addNote = (row: ExtractedBatch["pages"][number]["rows"][number], note: string) => {
+    const existing = (row.notes as string | undefined) ?? "";
+    row.notes = existing ? `${existing} · ${note}` : note;
+  };
+  const applyEntry = (
+    row: ExtractedBatch["pages"][number]["rows"][number],
+    entry: AnswerKeyEntry,
+  ) => {
+    row.correct_answer = entry.answer as OptionLetter;
+    // Keep the schema's 0-based index field in sync with the answer letter. In answer_key_at_end
+    // mode the body extractor can't see the answer, so it leaves correct_index at its default (0);
+    // once the key supplies the letter the index must be recomputed, or the exported correct_index
+    // column stays wrong. Mirrors the ReviewTable "use AI" convention (letter → ABCDE ordinal).
+    const letterIndex = OPTION_LETTERS.indexOf(entry.answer);
+    if ("correct_index" in row && letterIndex >= 0) {
+      (row as Record<string, unknown>).correct_index = letterIndex;
+    }
+    if (typeof row.confidence === "number") {
+      row.confidence = Math.min(row.confidence, entry.confidence);
+    } else {
+      row.confidence = entry.confidence;
+    }
+    if (entry.notes) addNote(row, `key: ${entry.notes}`);
+    matchedKeys.add(compoundKey(hasSections ? entry.section : null, entry.question_number));
+    matched += 1;
+  };
+
+  // Collect patchable rows in document order (page, then row index within page).
+  const patchable: Array<{ pageNumber: number; section: string | null; qn: string; row: ExtractedBatch["pages"][number]["rows"][number] }> = [];
+  for (const page of [...body.pages].sort((a, b) => a.page_number - b.page_number)) {
     const pageSection = pageSectionMap.get(page.page_number) ?? null;
     for (const row of page.rows) {
       const qn = String(row.question_number ?? "");
       // Skip rows outside the answer-key region(s) — e.g. inline-marked questions in a
       // mixed-format document that already have their own correct_answer.
       if (!isPatchable(qn, page.page_number)) continue;
-      // Try compound key first (section-aware), then fall back to bare question number
-      const entry =
-        keyMap.get(compoundKey(hasSections ? pageSection : null, qn)) ??
-        (hasSections ? keyMap.get(qn) : undefined);
+      patchable.push({ pageNumber: page.page_number, section: pageSection, qn, row });
+    }
+  }
 
-      if (entry) {
-        const ck = compoundKey(hasSections ? entry.section : null, entry.question_number);
-        row.correct_answer = entry.answer as OptionLetter;
-        if (typeof row.confidence === "number") {
-          row.confidence = Math.min(row.confidence, entry.confidence);
+  // Detect multi-section numbering collisions: the same question_number appearing on more
+  // than one patchable row (e.g. each section restarts at Q1).
+  const qnCounts = new Map<string, number>();
+  for (const p of patchable) qnCounts.set(p.qn, (qnCounts.get(p.qn) ?? 0) + 1);
+  const hasDuplicateQns = [...qnCounts.values()].some((c) => c > 1);
+
+  // Per-row matcher for single-section docs (and the fallback for labeled multi-section docs
+  // whose run structure we couldn't align positionally).
+  const matchBySectionOrNumber = (p: (typeof patchable)[number]) => {
+    const entry =
+      keyMap.get(compoundKey(hasSections ? p.section : null, p.qn)) ??
+      (hasSections ? keyMap.get(p.qn) : undefined);
+    if (entry) applyEntry(p.row, entry);
+    else {
+      addNote(p.row, "no entry in answer key");
+      unmatchedBodyRows.push({ page_number: p.pageNumber, question_number: p.qn });
+    }
+  };
+
+  let strategy: PatchSummary["strategy"] = "single-section";
+  let bodyRunLengths: number[] = [];
+  let keyRunLengths: number[] = [];
+
+  if (hasDuplicateQns) {
+    // Multi-section exam (numbering repeats across sections). Bare question_number is ambiguous,
+    // and section LABELS are unreliable: the key's labels come from a different AI pass than the
+    // body's page sections, so the two frequently don't match and label-based matching drops many
+    // rows. So we prefer POSITIONAL run matching: segment both sides into numbering-runs (a run =
+    // a section, ending where the count resets) and, when the per-run lengths line up in order,
+    // assign each section's answers by position. This is label-independent and robust to
+    // formatting (key as one continuous list vs. body spanning pages). Section labels are only a
+    // fallback for when the run structure can't be aligned. The per-section AI-agreement validator
+    // in the compare stage is the backstop that catches a key whose sections were out of order.
+    const bodyRuns = segmentNumberingRuns(patchable, (p) => parseQuestionNumber(p.qn));
+    const keyRuns = segmentNumberingRuns(key.entries, (e) => parseQuestionNumber(e.question_number));
+    bodyRunLengths = bodyRuns.map((r) => r.length);
+    keyRunLengths = keyRuns.map((r) => r.length);
+
+    if (bodyRuns.length === keyRuns.length) {
+      // Same number of sections: pair section-run i <-> key-run i (answer keys are listed in
+      // document order), then WITHIN each section match by question_number. Within a section
+      // numbers are unique, so this tolerates the vision model occasionally misreading a few
+      // answers — a missing or extra key entry leaves only that one question unfilled instead of
+      // breaking the whole section's alignment (which a blind position-by-position match would).
+      strategy = "section-paired";
+      for (let i = 0; i < bodyRuns.length; i++) {
+        const keyByQn = new Map<string, AnswerKeyEntry>();
+        for (const e of keyRuns[i]) keyByQn.set(String(e.question_number ?? ""), e);
+        for (const p of bodyRuns[i]) {
+          const entry = keyByQn.get(p.qn);
+          if (entry) applyEntry(p.row, entry);
+          else {
+            addNote(p.row, "no entry in answer key");
+            unmatchedBodyRows.push({ page_number: p.pageNumber, question_number: p.qn });
+          }
+        }
+      }
+    } else if (hasSections) {
+      // Run structure couldn't be aligned, but the key carries section labels — try those.
+      strategy = "section-label";
+      for (const p of patchable) matchBySectionOrNumber(p);
+    } else {
+      strategy = "bare-number-with-flags";
+      // No labels and no structural alignment: refuse to guess on the duplicated numbers (leave
+      // null + flag for review), but still match any unique numbers by their bare question_number.
+      for (const p of patchable) {
+        if ((qnCounts.get(p.qn) ?? 0) > 1) {
+          (p.row as Record<string, unknown>).answer_key_unresolved = true;
+          addNote(p.row, "ambiguous answer-key match (multi-section, no section labels) — needs review");
+          unmatchedBodyRows.push({ page_number: p.pageNumber, question_number: p.qn });
         } else {
-          row.confidence = entry.confidence;
+          const entry = keyMap.get(p.qn);
+          if (entry) applyEntry(p.row, entry);
+          else {
+            addNote(p.row, "no entry in answer key");
+            unmatchedBodyRows.push({ page_number: p.pageNumber, question_number: p.qn });
+          }
         }
-        if (entry.notes) {
-          const existingNotes = (row.notes as string | undefined) ?? "";
-          row.notes = existingNotes ? `${existingNotes} · key: ${entry.notes}` : `key: ${entry.notes}`;
-        }
-        matchedKeys.add(ck);
-        matched += 1;
-      } else {
-        const existingNotes = (row.notes as string | undefined) ?? "";
-        row.notes = existingNotes
-          ? `${existingNotes} · no entry in answer key`
-          : "no entry in answer key";
-        unmatchedBodyRows.push({
-          page_number: page.page_number,
-          question_number: qn,
-        });
       }
     }
+  } else {
+    // Single-section document: section-aware compound match (or bare question_number).
+    for (const p of patchable) matchBySectionOrNumber(p);
   }
 
   const unmatchedKeyEntries = key.entries.filter(
     (e) => !matchedKeys.has(compoundKey(hasSections ? e.section : null, e.question_number)),
   );
 
-  return { batch: body, summary: { matched, unmatchedBodyRows, unmatchedKeyEntries } };
+  return {
+    batch: body,
+    summary: {
+      matched,
+      unmatchedBodyRows,
+      unmatchedKeyEntries,
+      strategy,
+      has_sections: hasSections,
+      body_run_lengths: bodyRunLengths,
+      key_run_lengths: keyRunLengths,
+    },
+  };
 }
 
 /** Heuristic for which pages are likely the answer-key pages: last 5% or last 5, capped at 20. */

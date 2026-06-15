@@ -478,22 +478,8 @@ pub fn export_figures_to_downloads(
 
     #[cfg(target_os = "android")]
     {
-        let mut written = 0;
-        for src in &figure_paths {
-            let p = std::path::Path::new(src);
-            let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            if !seen.insert(name.to_string()) {
-                continue;
-            }
-            let Ok(bytes) = std::fs::read(p) else {
-                continue;
-            };
-            android_mediastore::write_to_downloads(&subdir, name, mime_for(name), &bytes)?;
-            written += 1;
-        }
-        Ok(written)
+        let _ = &mut seen; // dedup happens inside the JNI helper on this target
+        android_mediastore::export_all(&subdir, &figure_paths)
     }
 
     #[cfg(not(target_os = "android"))]
@@ -541,121 +527,162 @@ fn mime_for(name: &str) -> &'static str {
 /// is in one place. We never marshal the image bytes through JNI: instead we ask the
 /// ContentResolver for a writable file descriptor, detach it, and write the bytes in
 /// Rust — avoiding fragile byte-array conversions across the boundary.
+///
+/// Hardened so it can never hard-crash the app: the Android context pointers from
+/// `ndk_context` are null-checked up front, every JNI call is mapped to a Result with
+/// a step label, and the whole thing runs inside `catch_unwind`. So if `ndk_context`
+/// isn't populated under Tauri v2 (or any step throws), the user gets a readable error
+/// in the UI instead of a SIGSEGV/abort.
 #[cfg(target_os = "android")]
 mod android_mediastore {
     use jni::objects::{JObject, JValue};
+    use jni::JNIEnv;
     use std::io::Write;
     use std::os::fd::{FromRawFd, RawFd};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
-    pub fn write_to_downloads(
+    /// Write every (unique, readable) figure into public Downloads/<subdir>/ and return
+    /// how many were written. Sets up the JNI session and Downloads collection Uri once,
+    /// then loops. Never panics out.
+    pub fn export_all(subdir: &str, figure_paths: &[String]) -> Result<usize, String> {
+        catch_unwind(AssertUnwindSafe(|| export_all_inner(subdir, figure_paths)))
+            .unwrap_or_else(|_| Err("image export panicked while talking to Android".into()))
+    }
+
+    fn export_all_inner(subdir: &str, figure_paths: &[String]) -> Result<usize, String> {
+        let ctx = ndk_context::android_context();
+        let vm_ptr = ctx.vm();
+        let context_ptr = ctx.context();
+        if vm_ptr.is_null() || context_ptr.is_null() {
+            return Err(format!(
+                "Android context unavailable (ndk_context not initialized): vm_null={}, context_null={}",
+                vm_ptr.is_null(),
+                context_ptr.is_null()
+            ));
+        }
+
+        let vm = unsafe { jni::JavaVM::from_raw(vm_ptr.cast()) }
+            .map_err(|e| format!("jni JavaVM: {e}"))?;
+        let mut env = vm
+            .attach_current_thread()
+            .map_err(|e| format!("jni attach thread: {e}"))?;
+        // SAFETY: pointer comes from ndk_context and is non-null (checked above).
+        let context = unsafe { JObject::from_raw(context_ptr.cast()) };
+
+        // ContentResolver + the Downloads collection Uri are fetched once and reused.
+        let resolver = call_obj(
+            &mut env,
+            &context,
+            "getContentResolver",
+            "()Landroid/content/ContentResolver;",
+            &[],
+            "getContentResolver",
+        )?;
+        let collection = get_static_obj(
+            &mut env,
+            "android/provider/MediaStore$Downloads",
+            "EXTERNAL_CONTENT_URI",
+            "Landroid/net/Uri;",
+            "Downloads.EXTERNAL_CONTENT_URI",
+        )?;
+
+        let mut seen = std::collections::HashSet::new();
+        let mut written = 0usize;
+        for src in figure_paths {
+            let p = std::path::Path::new(src);
+            let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !seen.insert(name.to_string()) {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(p) else {
+                continue;
+            };
+            write_one(
+                &mut env,
+                &resolver,
+                &collection,
+                subdir,
+                name,
+                super::mime_for(name),
+                &bytes,
+            )?;
+            written += 1;
+        }
+        Ok(written)
+    }
+
+    fn write_one(
+        env: &mut JNIEnv,
+        resolver: &JObject,
+        collection: &JObject,
         subdir: &str,
         filename: &str,
         mime: &str,
         bytes: &[u8],
     ) -> Result<(), String> {
-        let ctx = ndk_context::android_context();
-        let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }
-            .map_err(|e| format!("jni: get JavaVM: {e}"))?;
-        let mut env = vm
-            .attach_current_thread()
-            .map_err(|e| format!("jni: attach thread: {e}"))?;
-        // SAFETY: ndk_context hands us the Android Context pointer set up by the runtime.
-        let context = unsafe { JObject::from_raw(ctx.context().cast()) };
-
-        let fd = match insert_and_open_fd(&mut env, &context, subdir, filename, mime) {
-            Ok(fd) => fd,
-            Err(e) => {
-                // Clear any pending Java exception so the next file's calls aren't poisoned.
-                let _ = env.exception_clear();
-                return Err(format!("MediaStore write failed for {filename}: {e}"));
-            }
-        };
-
-        // detachFd transferred ownership of the descriptor to us; File's Drop closes it,
-        // which is what makes the MediaStore entry final and visible.
-        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-        file.write_all(bytes)
-            .map_err(|e| format!("write {filename} to Downloads: {e}"))?;
-        file.flush()
-            .map_err(|e| format!("flush {filename}: {e}"))?;
-        Ok(())
-    }
-
-    fn insert_and_open_fd(
-        env: &mut jni::JNIEnv,
-        context: &JObject,
-        subdir: &str,
-        filename: &str,
-        mime: &str,
-    ) -> Result<RawFd, jni::errors::Error> {
-        // ContentResolver resolver = context.getContentResolver();
-        let resolver = env
-            .call_method(
-                context,
-                "getContentResolver",
-                "()Landroid/content/ContentResolver;",
-                &[],
-            )?
-            .l()?;
-
         // ContentValues values = new ContentValues(); values.put(...);
-        let values = env.new_object("android/content/ContentValues", "()V", &[])?;
+        let values = env
+            .new_object("android/content/ContentValues", "()V", &[])
+            .map_err(|e| format!("new ContentValues: {e}"))?;
         put_string(env, &values, "_display_name", filename)?;
         put_string(env, &values, "mime_type", mime)?;
         put_string(env, &values, "relative_path", &format!("Download/{subdir}"))?;
 
-        // Uri collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI; (API 29+)
-        let collection = env
-            .get_static_field(
-                "android/provider/MediaStore$Downloads",
-                "EXTERNAL_CONTENT_URI",
-                "Landroid/net/Uri;",
-            )?
-            .l()?;
-
         // Uri item = resolver.insert(collection, values);
-        let item = env
-            .call_method(
-                &resolver,
-                "insert",
-                "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;",
-                &[JValue::Object(&collection), JValue::Object(&values)],
-            )?
-            .l()?;
+        let item = call_obj(
+            env,
+            resolver,
+            "insert",
+            "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;",
+            &[JValue::Object(collection), JValue::Object(&values)],
+            "insert",
+        )?;
         if item.is_null() {
-            return Err(jni::errors::Error::NullPtr("MediaStore.insert returned null"));
+            return Err(format!("MediaStore.insert returned null for {filename}"));
         }
 
         // ParcelFileDescriptor pfd = resolver.openFileDescriptor(item, "w");
-        let mode = env.new_string("w")?;
+        let mode = env.new_string("w").map_err(|e| format!("new_string w: {e}"))?;
         let mode_obj: &JObject = &mode;
-        let pfd = env
-            .call_method(
-                &resolver,
-                "openFileDescriptor",
-                "(Landroid/net/Uri;Ljava/lang/String;)Landroid/os/ParcelFileDescriptor;",
-                &[JValue::Object(&item), JValue::Object(mode_obj)],
-            )?
-            .l()?;
+        let pfd = call_obj(
+            env,
+            resolver,
+            "openFileDescriptor",
+            "(Landroid/net/Uri;Ljava/lang/String;)Landroid/os/ParcelFileDescriptor;",
+            &[JValue::Object(&item), JValue::Object(mode_obj)],
+            "openFileDescriptor",
+        )?;
         if pfd.is_null() {
-            return Err(jni::errors::Error::NullPtr(
-                "openFileDescriptor returned null",
-            ));
+            return Err(format!("openFileDescriptor returned null for {filename}"));
         }
 
         // int fd = pfd.detachFd();
-        let fd = env.call_method(&pfd, "detachFd", "()I", &[])?.i()?;
-        Ok(fd as RawFd)
+        let fd = env
+            .call_method(&pfd, "detachFd", "()I", &[])
+            .map_err(|e| format!("detachFd: {e}"))?
+            .i()
+            .map_err(|e| format!("detachFd not int: {e}"))?;
+        if fd < 0 {
+            return Err(format!("detachFd returned {fd} for {filename}"));
+        }
+
+        // detachFd handed us ownership; File's Drop closes the fd, finalizing the entry.
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd as RawFd) };
+        file.write_all(bytes)
+            .map_err(|e| format!("write {filename}: {e}"))?;
+        file.flush().map_err(|e| format!("flush {filename}: {e}"))?;
+        Ok(())
     }
 
-    fn put_string(
-        env: &mut jni::JNIEnv,
-        values: &JObject,
-        key: &str,
-        val: &str,
-    ) -> Result<(), jni::errors::Error> {
-        let k = env.new_string(key)?;
-        let v = env.new_string(val)?;
+    fn put_string(env: &mut JNIEnv, values: &JObject, key: &str, val: &str) -> Result<(), String> {
+        let k = env
+            .new_string(key)
+            .map_err(|e| format!("new_string {key}: {e}"))?;
+        let v = env
+            .new_string(val)
+            .map_err(|e| format!("new_string value: {e}"))?;
         let k_obj: &JObject = &k;
         let v_obj: &JObject = &v;
         env.call_method(
@@ -663,8 +690,38 @@ mod android_mediastore {
             "put",
             "(Ljava/lang/String;Ljava/lang/String;)V",
             &[JValue::Object(k_obj), JValue::Object(v_obj)],
-        )?;
+        )
+        .map_err(|e| format!("ContentValues.put {key}: {e}"))?;
         Ok(())
+    }
+
+    /// Call a JNI method expected to return an object, tagging any failure with `step`.
+    fn call_obj<'local>(
+        env: &mut JNIEnv<'local>,
+        obj: &JObject,
+        name: &str,
+        sig: &str,
+        args: &[JValue],
+        step: &str,
+    ) -> Result<JObject<'local>, String> {
+        env.call_method(obj, name, sig, args)
+            .map_err(|e| format!("{step}: {e}"))?
+            .l()
+            .map_err(|e| format!("{step}: result not object: {e}"))
+    }
+
+    /// Read a static object field, tagging any failure with `step`.
+    fn get_static_obj<'local>(
+        env: &mut JNIEnv<'local>,
+        class: &str,
+        field: &str,
+        sig: &str,
+        step: &str,
+    ) -> Result<JObject<'local>, String> {
+        env.get_static_field(class, field, sig)
+            .map_err(|e| format!("{step}: {e}"))?
+            .l()
+            .map_err(|e| format!("{step}: result not object: {e}"))
     }
 }
 
