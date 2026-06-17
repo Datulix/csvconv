@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as RMouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type MouseEvent as RMouseEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { loadRows, listRuns, getRunPdfBase64, saveRows, type SqliteRowRecord, type SqliteRunRecord } from "../lib/sqliteCache";
+import { readFile, writeFile } from "@tauri-apps/plugin-fs";
+import { loadRows, listRuns, renderRunPdfPage, saveRows, type SqliteRowRecord, type SqliteRunRecord } from "../lib/sqliteCache";
 import { buildAuditJson, buildCsv, projectRow, writeTextFile, type AuditExport } from "../lib/export";
-import { exportFiguresToDownloads } from "../lib/pdfApi";
+import { exportFiguresToDownloads, zipFigures } from "../lib/pdfApi";
+import { platformKind } from "../lib/updates";
 import { loadSchemas } from "../lib/schemaStorage";
 import { loadSettings } from "../lib/settings";
 import { PRESETS } from "../schema/presets";
@@ -21,18 +23,20 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
+  const [editMode, setEditMode] = useState(false);
   const [savedSchemas, setSavedSchemas] = useState<Schema[]>([]);
   const [selectedSchemaName, setSelectedSchemaName] = useState<string | null>(null);
   const [runRecord, setRunRecord] = useState<SqliteRunRecord | null>(null);
   const [hashMatchedSchema, setHashMatchedSchema] = useState<Schema | null>(null);
   const [activeLightbox, setActiveLightbox] = useState<{ path?: string; explanation: string; kind: string } | null>(null);
 
-  // Source-PDF preview panel beside the columns.
+  // Source-PDF preview panel beside the columns. Pages are rendered to images (an iframe
+  // can't display a PDF in the WebView, especially on Android).
   const [showPdf, setShowPdf] = useState(false);
-  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  const [pdfImg, setPdfImg] = useState<string | null>(null);
   const [pdfStatus, setPdfStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [pdfError, setPdfError] = useState<string | null>(null);
   const [pdfPage, setPdfPage] = useState(1);
-  const pdfFrameRef = useRef<HTMLIFrameElement>(null);
 
   // Per-column widths (px) set by drag-resizing the header borders.
   const [colWidths, setColWidths] = useState<Record<string, number>>({});
@@ -165,45 +169,44 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
     };
   }, [runRecord, runSchema, savedSchemas]);
 
-  // Load the source PDF as a blob URL the first time the panel is opened for a run.
-  // Re-fetched whenever the run changes; the object URL is revoked on cleanup.
+  // Render the requested page of the source PDF to an image. The WebView can't show a PDF
+  // in an iframe (Android System WebView has no PDF viewer), so we render server-side via
+  // pdfium and display a JPEG. Re-renders whenever the page or run changes.
   useEffect(() => {
     if (!showPdf || !cacheKey) return;
     let cancelled = false;
-    let createdUrl: string | null = null;
     setPdfStatus("loading");
-    getRunPdfBase64(cacheKey)
+    setPdfError(null);
+    renderRunPdfPage(cacheKey, pdfPage)
       .then((b64) => {
         if (cancelled) return;
-        const blob = base64ToBlob(b64, "application/pdf");
-        createdUrl = URL.createObjectURL(blob);
-        setPdfUrl(createdUrl);
+        setPdfImg(`data:image/jpeg;base64,${b64}`);
         setPdfStatus("ready");
       })
       .catch((err) => {
         if (cancelled) return;
-        console.error("loading source pdf", err);
+        console.error("rendering pdf page", err);
+        setPdfError(String(err));
         setPdfStatus("error");
       });
     return () => {
       cancelled = true;
-      if (createdUrl) URL.revokeObjectURL(createdUrl);
-      setPdfUrl(null);
-      setPdfStatus("idle");
     };
-  }, [showPdf, cacheKey]);
+  }, [showPdf, cacheKey, pdfPage]);
 
-  // Drive the iframe to the requested page. Setting .src (rather than just the
-  // attribute) forces the embedded viewer to navigate even on a fragment-only change.
+  // Drop any stale rendered page when the run changes so we never show run A's page for run B.
   useEffect(() => {
-    if (pdfStatus !== "ready" || !pdfUrl || !pdfFrameRef.current) return;
-    pdfFrameRef.current.src = `${pdfUrl}#page=${pdfPage}`;
-  }, [pdfUrl, pdfPage, pdfStatus]);
+    setPdfImg(null);
+    setPdfPage(1);
+  }, [cacheKey]);
 
   const openPdfAtPage = useCallback((page: number) => {
     setPdfPage(page);
     setShowPdf(true);
   }, []);
+
+  // Highest page number present, to bound the PDF panel's prev/next navigation.
+  const maxPage = useMemo(() => rows.reduce((m, r) => Math.max(m, r.page_number), 1), [rows]);
 
   const filteredRows = useMemo(() => {
     if (filter === "all") return rows;
@@ -248,6 +251,16 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
   const schemaColumns = useMemo(() => (activeSchema ? activeSchema.fields.map((f) => f.name) : null), [activeSchema]);
   const legacyColumns = useMemo(() => deriveColumns(rows), [rows]);
   const columns = schemaColumns ?? legacyColumns;
+
+  // Per-column editing metadata, aligned with `columns`. A column is editable when it maps
+  // directly to a canonical field (so we know where to write the value back). Template /
+  // computed schema fields are derived from other fields and stay read-only.
+  const columnMeta = useMemo<Array<{ name: string; key: string; editable: boolean }>>(() => {
+    if (activeSchema) {
+      return activeSchema.fields.map((f) => ({ name: f.name, key: f.name, editable: !f.template }));
+    }
+    return columns.map((c) => ({ name: c, key: c, editable: true }));
+  }, [activeSchema, columns]);
 
   const handleExportCsv = useCallback(async () => {
     const schema = activeSchema;
@@ -312,14 +325,13 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
     }
   }, [rows, activeSchema, runRecord, cacheKey]);
 
-  // Write every figure crop into the device's public Downloads/<subfolder>/, then fill
-  // the schema's image-URL column with `base + filename` so the exported CSV already
-  // points at where the images will live once uploaded.
+  // Export figure crops, then fill the schema's image-URL column with `base + filename`
+  // so the exported CSV already points at where the images will live once uploaded.
   //
-  // Goes through the native `export_figures_to_downloads` command (MediaStore on
-  // Android, ~/Downloads on desktop). The fs plugin's `BaseDirectory.Download` was
-  // tried first but on Android it lands in app-private external storage, which is
-  // invisible in the file manager — so the images couldn't be found or uploaded.
+  // Desktop copies the crops into ~/Downloads/<subfolder>/. Android bundles them into a
+  // single ZIP saved through the dialog (the fs-plugin content:// path that CSV export
+  // uses) — reliable, unlike per-file MediaStore writes or the invisible app-private
+  // `BaseDirectory.Download`.
   const handleExportImages = useCallback(async () => {
     setImgExportMsg(null);
 
@@ -342,10 +354,32 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
 
     setImgExporting(true);
     try {
-      const destSub = `csvconv-${cacheKey?.slice(0, 8) ?? "export"}`;
-      // Native side reads the crops and writes them into public Downloads, skipping
-      // duplicate basenames (hashes are already unique) and missing files.
-      const copied = await exportFiguresToDownloads(figurePaths, destSub);
+      const keyShort = cacheKey?.slice(0, 8) ?? "export";
+      let savedMsg: string;
+      if (platformKind() === "android") {
+        // Android: bundle the crops into one zip and save it through the dialog. This rides
+        // the same fs-plugin content:// path that makes CSV export reliable, instead of the
+        // fragile per-file MediaStore route.
+        const zipName = `csvconv-images-${keyShort}-${fileStamp()}.zip`;
+        const zipPath = await zipFigures(figurePaths, zipName);
+        const dest = await saveDialog({
+          defaultPath: zipName,
+          filters: [{ name: "ZIP", extensions: ["zip"] }],
+        });
+        if (!dest) {
+          setImgExporting(false);
+          return;
+        }
+        const bytes = await readFile(zipPath);
+        await writeFile(dest, bytes);
+        const n = figurePaths.length;
+        savedMsg = `Saved ${n} image${n === 1 ? "" : "s"} as a ZIP — extract it, then upload the images.`;
+      } else {
+        // Desktop: copy the crops into a Downloads subfolder.
+        const destSub = `csvconv-${keyShort}`;
+        const copied = await exportFiguresToDownloads(figurePaths, destSub);
+        savedMsg = `Saved ${copied} image${copied === 1 ? "" : "s"} to Downloads/${destSub}/.`;
+      }
 
       // Fill the image-URL column (if the active schema has one) and persist.
       const urlField = findImageUrlField(activeSchema);
@@ -379,7 +413,7 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
         filled = updated.length;
       }
 
-      const parts = [`Saved ${copied} image${copied === 1 ? "" : "s"} to Downloads/${destSub}/.`];
+      const parts = [savedMsg];
       if (urlField) {
         parts.push(`Filled "${urlField}" on ${filled} row${filled === 1 ? "" : "s"}.`);
       } else {
@@ -430,6 +464,30 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
       setError(`Failed to save answer change: ${String(err)}`);
     }
   }, []);
+
+  // Write a single edited field back to a row's canonical JSON, flag it user-edited, and
+  // persist. Optimistically updates local state so the cell reflects the change immediately;
+  // the same value then flows through to CSV / audit export (which read canonical_json).
+  const updateRowField = useCallback(
+    async (record: SqliteRowRecord, key: string, value: unknown) => {
+      const next = { ...(record.canonical_json as Record<string, unknown>), [key]: value };
+      const updated: SqliteRowRecord = { ...record, canonical_json: next, user_edited: true };
+      setRows((prev) =>
+        prev.map((r) =>
+          r.page_number === record.page_number &&
+          r.row_index_within_page === record.row_index_within_page
+            ? updated
+            : r,
+        ),
+      );
+      try {
+        await saveRows([updated]);
+      } catch (err) {
+        setError(`Failed to save edit: ${String(err)}`);
+      }
+    },
+    [],
+  );
 
   const handleAdoptAll = useCallback(() => {
     if (adoptableCount === 0) return;
@@ -544,6 +602,14 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
               </option>
             ))}
           </select>
+          <button
+            className={`btn-secondary ${editMode ? "active" : ""}`}
+            onClick={() => setEditMode((v) => !v)}
+            disabled={rows.length === 0}
+            title="Edit any field value inline. Changes are saved and used for CSV / audit export."
+          >
+            {editMode ? "Done editing" : "Edit rows"}
+          </button>
           <button
             className={`btn-secondary review-pdf-toggle ${showPdf ? "active" : ""}`}
             onClick={() => setShowPdf((v) => !v)}
@@ -684,8 +750,17 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
                     </td>
                     <td>{r.row_index_within_page}</td>
                     {hasFigures ? <td>{renderFigures(row)}</td> : null}
-                    {columns.map((c, ci) => (
-                      <td key={c}>{formatCell(cellValues[ci])}</td>
+                    {columnMeta.map((meta, ci) => (
+                      <td key={meta.name} className={editMode && meta.editable ? "review-edit-cell" : ""}>
+                        {editMode && meta.editable ? (
+                          <EditableCell
+                            value={row[meta.key]}
+                            onCommit={(v) => void updateRowField(r, meta.key, v)}
+                          />
+                        ) : (
+                          formatCell(cellValues[ci])
+                        )}
+                      </td>
                     ))}
                     <td>{renderFlags(r, row)}</td>
                   </tr>
@@ -707,6 +782,7 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
             const fields = activeSchema
               ? projectRow(activeSchema, row as ExtractedRow)
               : columns.map((c) => ({ name: c, value: row[c] }));
+            const editableByName = new Map(columnMeta.map((m) => [m.name, m]));
             const figs = (row.figures as any[]) ?? [];
             return (
               <div
@@ -726,12 +802,24 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
                   {figs.length > 0 ? renderFigures(row) : null}
                 </div>
                 <dl className="review-card-fields">
-                  {fields.map((f) => (
-                    <div key={f.name} className="review-card-field">
-                      <dt>{f.name}</dt>
-                      <dd>{formatCell(f.value)}</dd>
-                    </div>
-                  ))}
+                  {fields.map((f) => {
+                    const meta = editableByName.get(f.name);
+                    return (
+                      <div key={f.name} className="review-card-field">
+                        <dt>{f.name}</dt>
+                        <dd>
+                          {editMode && meta?.editable ? (
+                            <EditableCell
+                              value={row[meta.key]}
+                              onCommit={(v) => void updateRowField(r, meta.key, v)}
+                            />
+                          ) : (
+                            formatCell(f.value)
+                          )}
+                        </dd>
+                      </div>
+                    );
+                  })}
                 </dl>
                 <div className="review-card-flags">{renderFlags(r, row)}</div>
               </div>
@@ -744,16 +832,41 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
         {showPdf ? (
           <aside className="review-pdf-panel">
             <div className="review-pdf-bar">
-              <span>Source PDF{pdfStatus === "ready" ? ` · page ${pdfPage}` : ""}</span>
+              <div className="review-pdf-nav">
+                <button
+                  className="review-pdf-navbtn"
+                  onClick={() => setPdfPage((p) => Math.max(1, p - 1))}
+                  disabled={pdfPage <= 1}
+                  title="Previous page"
+                >
+                  ‹
+                </button>
+                <span>Page {pdfPage}{maxPage > 1 ? ` / ${maxPage}` : ""}</span>
+                <button
+                  className="review-pdf-navbtn"
+                  onClick={() => setPdfPage((p) => Math.min(maxPage, p + 1))}
+                  disabled={pdfPage >= maxPage}
+                  title="Next page"
+                >
+                  ›
+                </button>
+              </div>
               <button className="review-pdf-close" onClick={() => setShowPdf(false)} title="Hide PDF">×</button>
             </div>
-            {pdfStatus === "loading" ? <p className="hint review-pdf-msg">Loading PDF…</p> : null}
-            {pdfStatus === "error" ? (
-              <p className="status error review-pdf-msg">
-                Source PDF unavailable — it may have been moved or deleted since this run.
-              </p>
-            ) : null}
-            <iframe ref={pdfFrameRef} title="Source PDF" className="review-pdf-frame" />
+            <div className="review-pdf-scroll">
+              {pdfStatus === "loading" && !pdfImg ? (
+                <p className="hint review-pdf-msg">Rendering page…</p>
+              ) : null}
+              {pdfStatus === "error" ? (
+                <p className="status error review-pdf-msg">
+                  Couldn't render this page{pdfError ? `: ${pdfError}` : "."}. The source PDF may have
+                  been moved or deleted since this run.
+                </p>
+              ) : null}
+              {pdfImg ? (
+                <img className="review-pdf-image" src={pdfImg} alt={`PDF page ${pdfPage}`} />
+              ) : null}
+            </div>
           </aside>
         ) : null}
       </div>
@@ -774,6 +887,76 @@ export function ReviewTable({ cacheKey }: ReviewTableProps) {
       ) : null}
     </div>
   );
+}
+
+/**
+ * Inline editor for one canonical field value. Keeps a local text draft and commits on
+ * blur / Enter (Escape reverts), coercing the text back toward the original value's type so
+ * numbers stay numbers and JSON-ish fields (options, etc.) round-trip. Escape closes without
+ * saving; Shift+Enter inserts a newline for multi-line fields.
+ */
+function EditableCell({ value, onCommit }: { value: unknown; onCommit: (v: unknown) => void }) {
+  const [text, setText] = useState(() => valueToText(value));
+  // Re-sync if the underlying value changes externally (e.g. adopt-AI, image export).
+  useEffect(() => setText(valueToText(value)), [value]);
+
+  const commit = () => {
+    const coerced = coerceValue(value, text);
+    if (JSON.stringify(coerced) !== JSON.stringify(value)) onCommit(coerced);
+  };
+
+  return (
+    <textarea
+      className="review-edit-input"
+      value={text}
+      rows={1}
+      spellCheck={false}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          (e.target as HTMLTextAreaElement).blur();
+        } else if (e.key === "Escape") {
+          setText(valueToText(value));
+          (e.target as HTMLTextAreaElement).blur();
+        }
+      }}
+    />
+  );
+}
+
+/** Render a canonical value as editable text. Objects/arrays become JSON. */
+function valueToText(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  return JSON.stringify(v);
+}
+
+/** Coerce edited text back toward the original value's type. */
+function coerceValue(original: unknown, text: string): unknown {
+  if (typeof original === "number") {
+    if (text.trim() === "") return null;
+    const n = Number(text);
+    return Number.isNaN(n) ? text : n;
+  }
+  if (typeof original === "boolean") {
+    const t = text.trim().toLowerCase();
+    if (t === "true") return true;
+    if (t === "false") return false;
+    return text;
+  }
+  if (original && typeof original === "object") {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return text;
+    }
+  }
+  // Original was a string, null, or undefined.
+  if (text === "") return original === null || original === undefined ? null : "";
+  return text;
 }
 
 /** Last path segment, handling both / and \ separators (figures use OS-native paths). */
@@ -818,13 +1001,6 @@ function isAdoptable(r: SqliteRowRecord): boolean {
   const ai = row.ai_answer;
   if (ai === null || ai === undefined || ai === "") return false;
   return row.correct_answer !== ai;
-}
-
-function base64ToBlob(b64: string, type: string): Blob {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return new Blob([bytes], { type });
 }
 
 function deriveColumns(rows: SqliteRowRecord[]): string[] {

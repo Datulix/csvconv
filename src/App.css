@@ -131,6 +131,25 @@ body {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+/* Clickable "update available" pill in the sidebar footer. */
+.update-badge {
+  display: block;
+  margin-top: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--accent, #4a90d9);
+  background: transparent;
+  border: 1px solid var(--accent, #4a90d9);
+  border-radius: 999px;
+  cursor: pointer;
+  width: 100%;
+  text-align: center;
+}
+
+.update-badge:hover {
+  background: rgba(74, 144, 217, 0.12);
+}
+
 .main-content {
   flex: 1;
   display: flex;
@@ -1620,6 +1639,47 @@ select {
   background: #525659;
 }
 
+/* Rendered-page image view (replaces the iframe so it works in the Android WebView). */
+.review-pdf-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.review-pdf-navbtn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg-muted);
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.review-pdf-navbtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.review-pdf-scroll {
+  flex: 1 1 auto;
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 10px;
+  background: #525659;
+}
+
+.review-pdf-image {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
 .review-page-cell {
   cursor: pointer;
   color: var(--accent);
@@ -1745,6 +1805,52 @@ select {
   text-overflow: ellipsis;
   white-space: normal;
   word-break: break-word;
+}
+
+/* Inline edit mode: editable cells + the textarea that replaces their text. */
+.review-edit-cell {
+  padding: 2px !important;
+}
+
+.review-edit-input {
+  width: 100%;
+  min-height: 2em;
+  box-sizing: border-box;
+  resize: vertical;
+  font: inherit;
+  color: inherit;
+  background: var(--surface-2, #1b1f27);
+  border: 1px solid var(--accent, #4a90d9);
+  border-radius: 4px;
+  padding: 4px 6px;
+  line-height: 1.3;
+}
+
+.review-edit-input:focus {
+  outline: none;
+  border-color: var(--accent, #4a90d9);
+  box-shadow: 0 0 0 2px rgba(74, 144, 217, 0.3);
+}
+
+/* Updates card: version line + action buttons. */
+.update-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.update-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.update-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 /* Header label — truncates with ellipsis, leaves room for the resize handle. */
@@ -3253,8 +3359,18 @@ button:disabled {
     padding: 20px 16px 32px;
   }
 
+  /* The rendered-image PDF view works in the WebView, so on small screens show it as a
+     full-screen overlay instead of a cramped side panel. */
   .review-pdf-panel {
-    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    flex: none;
+    width: auto;
+    height: auto;
+    min-height: 0;
+    border: 0;
+    border-radius: 0;
   }
 
   .review-split {
@@ -3415,11 +3531,7 @@ button:disabled {
     grid-template-columns: 110px 1fr;
   }
 
-  /* Hide PDF side panel — too cramped */
-  .review-pdf-panel {
-    display: none;
-  }
-
+  /* PDF panel stays a full-screen overlay on phones (rules in the ≤900px block). */
   .review-split {
     display: block;
   }
@@ -3431,12 +3543,6 @@ button:disabled {
 
   .review-cards {
     display: flex;
-  }
-
-  /* The PDF side-panel is hidden on phones, so the toggle would be a dead button
-     (and Android WebView can't render a PDF in an iframe anyway). */
-  .review-pdf-toggle {
-    display: none;
   }
 
   /* History header wrap */

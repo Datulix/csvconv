@@ -78,11 +78,25 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: Stamp release version
+        shell: bash
+        run: |
+          VER="${{ needs.tag.outputs.new_tag }}"; VER="${VER#v}"
+          node -e "for(const f of ['package.json','src-tauri/tauri.conf.json']){const j=require('./'+f);j.version='$VER';require('fs').writeFileSync(f,JSON.stringify(j,null,2)+'\n')}"
+
       - name: Initialize Tauri Android project
         run: npm run tauri android init
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           NDK_HOME: ${{ env.NDK_HOME }}
+
+      - name: Allow in-app APK install
+        shell: bash
+        run: |
+          # The "Update" button launches the system package installer, which requires the
+          # REQUEST_INSTALL_PACKAGES permission. Inject it into the generated manifest.
+          MANIFEST=src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          node -e "const fs=require('fs');const f='$MANIFEST';let m=fs.readFileSync(f,'utf8');const p='<uses-permission android:name=\"android.permission.REQUEST_INSTALL_PACKAGES\" />';if(!m.includes('REQUEST_INSTALL_PACKAGES')){m=m.replace('<application',p+'\n    <application');fs.writeFileSync(f,m)}"
 
       - name: Download pdfium for Android arm64
         run: |
@@ -151,6 +165,12 @@ jobs:
 
       - name: Install npm dependencies
         run: npm ci
+
+      - name: Stamp release version
+        shell: bash
+        run: |
+          VER="${{ needs.tag.outputs.new_tag }}"; VER="${VER#v}"
+          node -e "for(const f of ['package.json','src-tauri/tauri.conf.json']){const j=require('./'+f);j.version='$VER';require('fs').writeFileSync(f,JSON.stringify(j,null,2)+'\n')}"
 
       - name: Download pdfium for Windows x64
         shell: bash

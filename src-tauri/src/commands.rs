@@ -385,6 +385,25 @@ pub fn read_run_pdf_base64(
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
+/// Render one page of a run's source PDF to a base64 JPEG for the Review preview panel.
+/// The WebView can't show a PDF in an iframe (Android System WebView has no PDF viewer),
+/// so the panel displays this rendered image instead. `page` is 1-based.
+#[tauri::command]
+pub fn render_pdf_page(
+    app: AppHandle,
+    state: State<'_, CacheState>,
+    cache_key: String,
+    page: u32,
+    dpi: u32,
+) -> Result<String, String> {
+    let path = with_cache(&app, &state, |c| {
+        c.get_pdf_path_for_run(&cache_key).map_err(|e| format!("{e:#}"))
+    })?;
+    let path = path.ok_or_else(|| "no source PDF recorded for this run".to_string())?;
+    let pdfium = make_pdfium()?;
+    pdf::render_page_base64(&pdfium, &path, page, dpi).map_err(|e| format!("{e:#}"))
+}
+
 #[tauri::command]
 pub fn cache_save_trace(
     app: AppHandle,
@@ -678,6 +697,153 @@ mod android_mediastore {
         Ok(())
     }
 
+    /// Write a single APK into public Downloads/csvconv/ and return its MediaStore
+    /// `content://` URI (as a string), which the package installer can read to install it.
+    /// Mirrors `export_all` for crash-safety: null-checked context, labelled Results,
+    /// wrapped in catch_unwind.
+    pub fn save_apk(filename: &str, bytes: &[u8]) -> Result<String, String> {
+        catch_unwind(AssertUnwindSafe(|| save_apk_inner(filename, bytes)))
+            .unwrap_or_else(|_| Err("apk staging panicked while talking to Android".into()))
+    }
+
+    fn save_apk_inner(filename: &str, bytes: &[u8]) -> Result<String, String> {
+        let ctx = ndk_context::android_context();
+        let vm_ptr = ctx.vm();
+        let context_ptr = ctx.context();
+        if vm_ptr.is_null() || context_ptr.is_null() {
+            return Err("Android context unavailable (ndk_context not initialized)".into());
+        }
+        let vm = unsafe { jni::JavaVM::from_raw(vm_ptr.cast()) }
+            .map_err(|e| format!("jni JavaVM: {e}"))?;
+        let mut env = vm
+            .attach_current_thread()
+            .map_err(|e| format!("jni attach thread: {e}"))?;
+        // SAFETY: pointer comes from ndk_context and is non-null (checked above).
+        let context = unsafe { JObject::from_raw(context_ptr.cast()) };
+
+        let resolver = call_obj(
+            &mut env,
+            &context,
+            "getContentResolver",
+            "()Landroid/content/ContentResolver;",
+            &[],
+            "getContentResolver",
+        )?;
+        let collection = get_static_obj(
+            &mut env,
+            "android/provider/MediaStore$Downloads",
+            "EXTERNAL_CONTENT_URI",
+            "Landroid/net/Uri;",
+            "Downloads.EXTERNAL_CONTENT_URI",
+        )?;
+
+        // ContentValues for the APK entry.
+        let values = env
+            .new_object("android/content/ContentValues", "()V", &[])
+            .map_err(|e| format!("new ContentValues: {e}"))?;
+        put_string(&mut env, &values, "_display_name", filename)?;
+        put_string(
+            &mut env,
+            &values,
+            "mime_type",
+            "application/vnd.android.package-archive",
+        )?;
+        put_string(&mut env, &values, "relative_path", "Download/csvconv")?;
+
+        let item = call_obj(
+            &mut env,
+            &resolver,
+            "insert",
+            "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;",
+            &[JValue::Object(&collection), JValue::Object(&values)],
+            "insert",
+        )?;
+        if item.is_null() {
+            return Err("MediaStore.insert returned null for the APK".into());
+        }
+
+        // Write the APK bytes through a detached file descriptor (as in write_one).
+        let mode = env.new_string("w").map_err(|e| format!("new_string w: {e}"))?;
+        let mode_obj: &JObject = &mode;
+        let pfd = call_obj(
+            &mut env,
+            &resolver,
+            "openFileDescriptor",
+            "(Landroid/net/Uri;Ljava/lang/String;)Landroid/os/ParcelFileDescriptor;",
+            &[JValue::Object(&item), JValue::Object(mode_obj)],
+            "openFileDescriptor",
+        )?;
+        if pfd.is_null() {
+            return Err("openFileDescriptor returned null for the APK".into());
+        }
+        let fd = env
+            .call_method(&pfd, "detachFd", "()I", &[])
+            .map_err(|e| format!("detachFd: {e}"))?
+            .i()
+            .map_err(|e| format!("detachFd not int: {e}"))?;
+        if fd < 0 {
+            return Err(format!("detachFd returned {fd} for the APK"));
+        }
+        {
+            let mut file = unsafe { std::fs::File::from_raw_fd(fd as RawFd) };
+            file.write_all(bytes).map_err(|e| format!("write apk: {e}"))?;
+            file.flush().map_err(|e| format!("flush apk: {e}"))?;
+        }
+
+        // Capture item.toString() for the status line / logging.
+        let uri_obj = call_obj(&mut env, &item, "toString", "()Ljava/lang/String;", &[], "Uri.toString")?;
+        let jstr: jni::objects::JString = uri_obj.into();
+        let uri: String = env
+            .get_string(&jstr)
+            .map_err(|e| format!("get_string uri: {e}"))?
+            .into();
+
+        // Launch the system package installer on the staged APK:
+        //   Intent i = new Intent(Intent.ACTION_VIEW);
+        //   i.setDataAndType(item, "application/vnd.android.package-archive");
+        //   i.addFlags(FLAG_ACTIVITY_NEW_TASK | FLAG_GRANT_READ_URI_PERMISSION);
+        //   context.startActivity(i);
+        let action = env
+            .new_string("android.intent.action.VIEW")
+            .map_err(|e| format!("new_string action: {e}"))?;
+        let action_obj: &JObject = &action;
+        let intent = env
+            .new_object(
+                "android/content/Intent",
+                "(Ljava/lang/String;)V",
+                &[JValue::Object(action_obj)],
+            )
+            .map_err(|e| format!("new Intent: {e}"))?;
+        let mime = env
+            .new_string("application/vnd.android.package-archive")
+            .map_err(|e| format!("new_string mime: {e}"))?;
+        let mime_obj: &JObject = &mime;
+        env.call_method(
+            &intent,
+            "setDataAndType",
+            "(Landroid/net/Uri;Ljava/lang/String;)Landroid/content/Intent;",
+            &[JValue::Object(&item), JValue::Object(mime_obj)],
+        )
+        .map_err(|e| format!("setDataAndType: {e}"))?;
+        // FLAG_ACTIVITY_NEW_TASK (0x10000000) | FLAG_GRANT_READ_URI_PERMISSION (0x1).
+        env.call_method(
+            &intent,
+            "addFlags",
+            "(I)Landroid/content/Intent;",
+            &[JValue::Int(0x1000_0001)],
+        )
+        .map_err(|e| format!("addFlags: {e}"))?;
+        env.call_method(
+            &context,
+            "startActivity",
+            "(Landroid/content/Intent;)V",
+            &[JValue::Object(&intent)],
+        )
+        .map_err(|e| format!("startActivity: {e}"))?;
+
+        Ok(uri)
+    }
+
     fn put_string(env: &mut JNIEnv, values: &JObject, key: &str, val: &str) -> Result<(), String> {
         let k = env
             .new_string(key)
@@ -724,6 +890,107 @@ mod android_mediastore {
             .map_err(|e| format!("{step}: {e}"))?
             .l()
             .map_err(|e| format!("{step}: result not object: {e}"))
+    }
+}
+
+/// Bundle figure crops into a single ZIP (stored, no recompression — they're already
+/// JPEGs) inside the app's data dir, returning the zip's path. The frontend then copies
+/// it out to a user-chosen location via the fs plugin's save dialog — the same content://
+/// path that makes CSV export work on Android, avoiding the fragile multi-file MediaStore
+/// route. Duplicate basenames (hashes are already unique) and missing files are skipped.
+#[tauri::command]
+pub fn zip_figures(
+    app: AppHandle,
+    figure_paths: Vec<String>,
+    file_name: String,
+) -> Result<String, String> {
+    use std::io::Write;
+    let dir = app_data_dir(&app)?.join("exports");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir exports: {e}"))?;
+    // Keep the name safe and force a .zip extension.
+    let safe: String = file_name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .collect();
+    let safe = if safe.is_empty() { "csvconv-images".to_string() } else { safe };
+    let name = if safe.to_ascii_lowercase().ends_with(".zip") { safe } else { format!("{safe}.zip") };
+    let zip_path = dir.join(&name);
+
+    let file = std::fs::File::create(&zip_path)
+        .map_err(|e| format!("create {}: {e}", zip_path.display()))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let opts: zip::write::FileOptions<'_, ()> =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+    let mut seen = std::collections::HashSet::new();
+    let mut added = 0usize;
+    for src in &figure_paths {
+        let p = std::path::Path::new(src);
+        let Some(entry_name) = p.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !seen.insert(entry_name.to_string()) || !p.exists() {
+            continue;
+        }
+        let bytes = match std::fs::read(p) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        zip.start_file(entry_name, opts)
+            .map_err(|e| format!("zip start {entry_name}: {e}"))?;
+        zip.write_all(&bytes).map_err(|e| format!("zip write {entry_name}: {e}"))?;
+        added += 1;
+    }
+    zip.finish().map_err(|e| format!("zip finish: {e}"))?;
+    if added == 0 {
+        return Err("no figure images could be read to zip".into());
+    }
+    Ok(zip_path.to_string_lossy().into_owned())
+}
+
+/// Launch a downloaded desktop installer (e.g. the NSIS `.exe`). Spawned detached so it
+/// keeps running after this app exits to overwrite itself. Desktop-only — Android installs
+/// go through `save_apk_to_downloads` + the system package installer.
+#[tauri::command]
+pub fn open_installer(path: String) -> Result<(), String> {
+    #[cfg(not(target_os = "android"))]
+    {
+        std::process::Command::new(&path)
+            .spawn()
+            .map_err(|e| format!("launch installer {path}: {e}"))?;
+        Ok(())
+    }
+    #[cfg(target_os = "android")]
+    {
+        let _ = path;
+        Err("open_installer is desktop-only".into())
+    }
+}
+
+/// Stage a freshly downloaded APK so Android's package installer can read it, and
+/// return a URI the installer will accept. The frontend downloads the release APK to an
+/// app-private file, hands the path here, and then opens the returned `content://` URI to
+/// launch the system installer.
+///
+/// On Android the file is written into public Downloads via MediaStore (the only place a
+/// MediaStore `content://` URI — readable by the installer — can be obtained without a
+/// storage permission). On desktop this isn't used: the frontend launches the downloaded
+/// installer directly, so we just hand the path back as a `file://`-style location.
+#[tauri::command]
+pub fn save_apk_to_downloads(app: AppHandle, apk_path: String) -> Result<String, String> {
+    let _ = &app;
+    #[cfg(target_os = "android")]
+    {
+        let bytes = std::fs::read(&apk_path).map_err(|e| format!("read apk {apk_path}: {e}"))?;
+        let name = std::path::Path::new(&apk_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("csvconv-update.apk");
+        android_mediastore::save_apk(name, &bytes)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(apk_path)
     }
 }
 

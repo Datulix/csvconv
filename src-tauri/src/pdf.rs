@@ -153,6 +153,60 @@ pub fn rasterize(
     })
 }
 
+/// Render a single page of a PDF to an in-memory JPEG and return it base64-encoded.
+/// Used by the Review "Show PDF" panel: the WebView (notably Android System WebView)
+/// can't display a PDF in an iframe, so we hand it a plain image instead. 1-based page.
+pub fn render_page_base64(
+    pdfium: &Pdfium,
+    pdf_path: &str,
+    page_number: u32,
+    dpi: u32,
+) -> Result<String> {
+    use base64::Engine;
+
+    let doc = pdfium
+        .load_pdf_from_file(pdf_path, None)
+        .with_context(|| format!("failed to open PDF: {pdf_path}"))?;
+    let pages = doc.pages();
+    let count = pages.len();
+    if page_number < 1 || page_number as u16 > count {
+        anyhow::bail!("page {page_number} out of range (1..={count})");
+    }
+    let page = pages
+        .get((page_number - 1) as u16)
+        .with_context(|| format!("failed to load page {page_number}"))?;
+
+    let page_width_points = page.width().value;
+    let page_height_points = page.height().value;
+    let mut target_width = (page_width_points / POINTS_PER_INCH * dpi as f32).round() as u32;
+    let mut target_height = (page_height_points / POINTS_PER_INCH * dpi as f32).round() as u32;
+    let max_dim = target_width.max(target_height);
+    if max_dim > MAX_LONG_EDGE {
+        let scale = MAX_LONG_EDGE as f32 / max_dim as f32;
+        target_width = ((target_width as f32) * scale).round() as u32;
+        target_height = ((target_height as f32) * scale).round() as u32;
+    }
+    target_width = target_width.max(1);
+    target_height = target_height.max(1);
+
+    let bitmap = page
+        .render_with_config(
+            &PdfRenderConfig::new()
+                .set_target_width(target_width as Pixels)
+                .set_target_height(target_height as Pixels)
+                .render_form_data(true),
+        )
+        .with_context(|| format!("failed to render page {page_number}"))?;
+    let image: DynamicImage = bitmap.as_image();
+
+    let mut buf: Vec<u8> = Vec::new();
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, JPEG_QUALITY);
+    image
+        .write_with_encoder(encoder)
+        .context("failed to encode page JPEG")?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(&buf))
+}
+
 fn deskew_image(image: &DynamicImage, angle_deg: f32) -> DynamicImage {
     let radians = -angle_deg.to_radians();
     let rgba = image.to_rgba8();

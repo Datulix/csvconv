@@ -130,3 +130,13 @@ export async function exportFiguresToDownloads(
 ): Promise<number> {
   return invoke<number>("export_figures_to_downloads", { figurePaths, subdir });
 }
+
+/**
+ * Bundle figure crops into a single ZIP in the app data dir and return its path. Used on
+ * Android, where the frontend then copies the zip out to a user-chosen location via the
+ * fs plugin save dialog (the reliable content:// path), instead of writing many files via
+ * the fragile MediaStore route.
+ */
+export async function zipFigures(figurePaths: string[], fileName: string): Promise<string> {
+  return invoke<string>("zip_figures", { figurePaths, fileName });
+}

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { checkForUpdate, performUpdate, type UpdateInfo } from "../lib/updates";
 import { SUPPORTED_MODELS, STAGES, type ModelId, type PipelineStage } from "../lib/models";
 import {
   AppSettings,
@@ -28,6 +29,10 @@ export function Settings() {
   const [revealKey, setRevealKey] = useState<boolean>(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [saveError, setSaveError] = useState<string>("");
+  const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const [updateState, setUpdateState] = useState<"idle" | "checking" | "updating" | "error">("idle");
+  const [updateError, setUpdateError] = useState<string>("");
+  const [updateStatus, setUpdateStatus] = useState<string>("");
 
   useEffect(() => {
     (async () => {
@@ -49,6 +54,46 @@ export function Settings() {
       }
     })();
   }, []);
+
+  // Check GitHub for a newer release once on mount (best-effort — offline / rate-limit
+  // failures stay silent here; the manual button surfaces errors).
+  useEffect(() => {
+    (async () => {
+      try {
+        setUpdate(await checkForUpdate());
+      } catch {
+        /* silent on auto-check */
+      }
+    })();
+  }, []);
+
+  async function handleCheckUpdate() {
+    setUpdateState("checking");
+    setUpdateError("");
+    try {
+      setUpdate(await checkForUpdate());
+      setUpdateState("idle");
+    } catch (err) {
+      setUpdateState("error");
+      setUpdateError(String(err));
+    }
+  }
+
+  async function handleUpdateNow() {
+    if (!update) return;
+    setUpdateState("updating");
+    setUpdateError("");
+    setUpdateStatus("");
+    try {
+      await performUpdate(update, setUpdateStatus);
+    } catch (err) {
+      // Fall back to the release page if no installer asset matched or the launch failed.
+      setUpdateStatus("");
+      setUpdateState("error");
+      setUpdateError(`${String(err)} Opening the release page instead…`);
+      await openUrl(update.releaseUrl);
+    }
+  }
 
   function setStage(stage: PipelineStage, value: ModelId | null) {
     setSettings((s) => ({ ...s, [`${stage}_model`]: value } as AppSettings));
@@ -424,6 +469,59 @@ export function Settings() {
             filename.
           </p>
         </div>
+      </section>
+
+      <section className="card">
+        <h2>Updates</h2>
+        <p className="hint">
+          Check GitHub for a newer build. Updating opens the release page where you can download
+          the Windows installer or Android APK.
+        </p>
+        <div className="update-row">
+          <div className="update-info">
+            <span>
+              Installed version:{" "}
+              <strong>{update ? `v${update.currentVersion}` : "…"}</strong>
+            </span>
+            {update ? (
+              update.hasUpdate ? (
+                <span className="status warning">
+                  Update available: v{update.latestVersion}
+                </span>
+              ) : (
+                <span className="status saved">You're on the latest version ✓</span>
+              )
+            ) : null}
+          </div>
+          <div className="update-actions">
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={handleCheckUpdate}
+              disabled={updateState === "checking" || updateState === "updating"}
+            >
+              {updateState === "checking" ? "Checking…" : "Check for updates"}
+            </button>
+            {update?.hasUpdate ? (
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={handleUpdateNow}
+                disabled={updateState === "updating"}
+              >
+                {updateState === "updating" ? "Updating…" : `Update to v${update.latestVersion}`}
+              </button>
+            ) : null}
+          </div>
+        </div>
+        {updateStatus ? <p className="status saved">{updateStatus}</p> : null}
+        {updateState === "error" ? <p className="status error">{updateError}</p> : null}
+        {update?.hasUpdate ? (
+          <p className="hint">
+            Downloads and launches the installer for this device. On Android you'll confirm one
+            standard system install prompt.
+          </p>
+        ) : null}
       </section>
 
       <div className="actions">

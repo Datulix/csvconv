@@ -130,6 +130,15 @@ export async function getRunPdfBase64(cacheKey: string): Promise<string> {
   return invoke<string>("read_run_pdf_base64", { cacheKey });
 }
 
+/**
+ * Render one page (1-based) of the run's source PDF to a base64 JPEG. The WebView can't
+ * display a PDF in an iframe (Android has no built-in PDF viewer), so the preview panel
+ * shows this rendered image instead.
+ */
+export async function renderRunPdfPage(cacheKey: string, page: number, dpi = 150): Promise<string> {
+  return invoke<string>("render_pdf_page", { cacheKey, page, dpi });
+}
+
 /** Copy figure image files to a folder the user picked. Returns the names copied. */
 export async function exportFigures(figurePaths: string[], destDir: string): Promise<string[]> {
   return invoke<string[]>("export_figures", { figurePaths, destDir });

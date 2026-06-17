@@ -25,6 +25,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_process::init())
         .manage(commands::CacheState(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             commands::triage_pdf,
@@ -60,7 +61,11 @@ pub fn run() {
             commands::cache_upsert_run,
             commands::cache_list_runs,
             commands::read_run_pdf_base64,
+            commands::render_pdf_page,
             commands::store_source_pdf,
+            commands::save_apk_to_downloads,
+            commands::open_installer,
+            commands::zip_figures,
             commands::cache_save_trace,
             commands::cache_load_all_traces,
         ])

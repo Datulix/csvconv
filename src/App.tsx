@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { getVersion } from "@tauri-apps/api/app";
+import { checkForUpdate, performUpdate, type UpdateInfo } from "./lib/updates";
 import { Settings } from "./components/Settings";
 import { SchemaEditor } from "./components/SchemaEditor";
 import { NewConversion } from "./components/NewConversion";
@@ -32,6 +35,10 @@ const NAV: NavItem[] = [
 function App() {
   const [view, setView] = useState<View>("convert");
   const [reviewCacheKey, setReviewCacheKey] = useState<string | null>(null);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const [updating, setUpdating] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState<string>("");
 
   useEffect(() => {
     // Step 20: clean up staging dirs older than 7 days on app start.
@@ -43,11 +50,40 @@ function App() {
         console.warn("staging cleanup failed (non-fatal)", err);
       }
     })();
+    // Report the real installed version and check GitHub for a newer release (best-effort).
+    (async () => {
+      try {
+        setAppVersion(await getVersion());
+      } catch (err) {
+        console.warn("could not read app version", err);
+      }
+      try {
+        const info = await checkForUpdate();
+        if (info.hasUpdate) setUpdate(info);
+      } catch (err) {
+        console.warn("update check failed (non-fatal)", err);
+      }
+    })();
   }, []);
 
   function openInReview(cacheKey: string) {
     setReviewCacheKey(cacheKey);
     setView("review");
+  }
+
+  async function handleUpdate() {
+    if (!update || updating) return;
+    setUpdating(true);
+    try {
+      await performUpdate(update, setUpdateStatus);
+    } catch (err) {
+      // Couldn't auto-install — open the release page so the user can grab it manually.
+      console.warn("update failed, opening release page", err);
+      await openUrl(update.releaseUrl);
+    } finally {
+      setUpdating(false);
+      setUpdateStatus("");
+    }
   }
 
   return (
@@ -71,7 +107,23 @@ function App() {
           ))}
         </nav>
         <div className="sidebar-footer">
-          <span className="version">v0.1.0{SHOW_DEBUG ? " · dev" : ""}</span>
+          <span className="version">
+            v{appVersion ?? "0.1.0"}
+            {SHOW_DEBUG ? " · dev" : ""}
+          </span>
+          {update?.hasUpdate ? (
+            <button
+              type="button"
+              className="update-badge"
+              title={`Version ${update.latestVersion} is available — click to update`}
+              onClick={handleUpdate}
+              disabled={updating}
+            >
+              {updating
+                ? updateStatus || `Updating to v${update.latestVersion}…`
+                : `● Update to v${update.latestVersion}`}
+            </button>
+          ) : null}
         </div>
       </aside>
       <main className="main-content">
